@@ -1,0 +1,4 @@
+madgraph_path: "./deps/MG5_aMC_v3_5_7" # Specify the root path of the MadGraph installation, e.g. "/path/to/MG5_aMC_v3_5_7"
+gammaloop_path: "./deps/gammaloop" # Specify the root path of the GammaLoop installation, e.g. "/path/to/gammaloop"
+output_path: "./outputs" # Specify where the output files will be saved
+symbolica_community_path: "./deps/symbolica-community" # None # Specify the path to the Symbolica community installation, e.g. "/path/to/symbolica_community"

@@ -35,6 +35,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 
 def get_model(model="sm"):
+    model = model.split('-')[0]
     match model:
         case "sm":
             model_params = ModelParameters(None)

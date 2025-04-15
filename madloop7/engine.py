@@ -1,3 +1,7 @@
+from . import logger
+from pprint import pformat
+from madloop7.process_definitions import HardCodedProcess, HARDCODED_PROCESSES
+from madloop7.utils import MadLoop7Error, get_model, FlatPhaseSpaceGenerator
 from typing import Any
 
 import yaml  # type: ignore
@@ -7,11 +11,10 @@ import sys
 import logging
 import subprocess
 import shutil
-from madloop7.utils import MadLoop7Error, get_model, FlatPhaseSpaceGenerator
-from madloop7.process_definitions import HardCodedProcess, HARDCODED_PROCESSES
-from pprint import pformat
+from enum import Enum
 
-from . import logger
+
+root_path = os.path.abspath(os.path.dirname(__file__))
 
 pjoin = os.path.join
 
@@ -19,6 +22,13 @@ MADSYMBOLIC_OUTPUT_DIR = "madsymbolic_outputs"
 MADGRAPH_OUTPUT_DIR = "madgraph_outputs"
 GAMMALOOP_OUTPUT_DIR = "gammaloop_outputs"
 MADLOOP7_OUTPUT_DIR = "madloop7_outputs"
+
+
+class EvalMode(Enum):
+    """Evaluation modes for MadLoop7."""
+    TREExTREE = "tree-level"
+    LOOPxTREE = "virtual"
+    LOOPxLOOP = "loop-induced"
 
 
 class MadLoop7(object):
@@ -56,7 +66,7 @@ class MadLoop7(object):
                 + [process.madgraph_generation,]
                 + [
                     f"write_graphs {yaml_graph_outputs} --format yaml",
-                    f"output {madgraph_output}",
+                    f"output standalone {madgraph_output}",
                 ]
                 + [
                     "\n".join([
@@ -113,7 +123,7 @@ class MadLoop7(object):
                     "ERROR: Could not import Python's gammaloop module.",
                     "Add '<GAMMALOOP_INSTALLATION_DIRECTORY>/python' to your PYTHONPATH or specify it under 'gammaloop_path' in the configuration file used to load MadLoop7.",]))
 
-        for graph_class in ['tree', 'loop']:
+        for graph_class in process.get_graph_categories():
             graphs = os.path.abspath(
                 pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}.dot"))
             gl_output = os.path.abspath(
@@ -136,7 +146,12 @@ class MadLoop7(object):
         logger.info("Build graph evaluators with spenso...")
 
         expressions: dict[Any, Any] = {}
-        for graph_class in ["tree", "loop"]:
+        for graph_class in ['tree', 'loop']:
+            expressions[graph_class] = {
+                'model_replacements': {},
+                'graph_expressions': {},
+            }
+        for graph_class in process.get_graph_categories():
             output_name = f"{process.name}_{graph_class}"
             # Load model replacements
             with open(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, output_name, "output_metadata.yaml"), "r") as f:
@@ -155,6 +170,7 @@ class MadLoop7(object):
                         graph_expressions[graph_id] = {
                             'expression': expr[0],
                             'momenta': dict(expr[1]),
+                            'denominators': dict(expr[2]),
                         }
 
             expressions[graph_class] = {
@@ -164,9 +180,258 @@ class MadLoop7(object):
 
         logger.debug("Model replacements:\n{}".format(
             pformat(model_replacements)))
-        tensor_nets = self.build_tensor_networks(expressions)
 
-    def build_tensor_networks(self, expressions: dict[Any, Any]) -> Any:
+        eval_mode = EvalMode.TREExTREE
+        if expressions["loop"]["graph_expressions"] == {} and expressions["tree"]["graph_expressions"] == {}:
+            raise MadLoop7Error(f"No graphs to interefere for {process.name}")
+
+        if expressions["loop"]["graph_expressions"] != {} and expressions["tree"]["graph_expressions"] != {}:
+            eval_mode = EvalMode.LOOPxTREE
+        elif expressions["tree"]["graph_expressions"] == {}:
+            eval_mode = EvalMode.LOOPxLOOP
+
+        # self.import_symbolica_community()
+        # from symbolica_community import Expression, S, E  # type: ignore # nopep8
+        # print((S("TTT", is_linear=True, is_symmetric=True)(
+        #     E("x+y"), E("x+y"))**-1).expand().to_canonical_string())
+        # stop
+
+        matrix_element_expression = self.build_matrix_element_expression(
+            expressions,  eval_mode)
+
+        self.export_evaluator(
+            process, matrix_element_expression, eval_mode)
+        # tensor_nets = self.build_tensor_networks(expressions, eval_mode)
+
+    def build_graph_expression(self, graph_expr: dict[Any, Any], to_lmb: bool = False) -> Any:
+        """Build the graph expression from the graph expression dictionary."""
+        self.import_symbolica_community()
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+
+        def E_sp(expr: str) -> Expression:
+            """Create a symbolica_community expression with the spenso namespace."""
+            return E(expr, default_namespace="spenso")
+
+        def curate(expr: Expression) -> Expression:
+            expr = expr.replace(E_sp("Metric(x_,y_)"),
+                                E_sp("g(x_,y_)"), repeat=True)
+            expr = expr.replace(E_sp("id(x_,y_)"),
+                                E_sp("𝟙(x_,y_)"), repeat=True)
+            expr = expr.replace(E("spenso::γ(x_,y_,z_)"), E(
+                "alg::gamma(x_,y_,z_)"), repeat=True)
+            expr = expr.replace(E("spenso::T(x_,y_,z_)"),
+                                E("alg::t(x_,y_,z_)"), repeat=True)
+            expr = expr.replace(E("spenso::f(x_,y_,z_)"),
+                                E("alg::f(x_,y_,z_)"), repeat=True)
+            expr = expr.replace(E("spenso::TR"), E("alg::TR"), repeat=True)
+            expr = expr.replace(E("spenso::Nc"), E("alg::Nc"), repeat=True)
+            expr = expr.replace(E("spenso::v(x__)"),
+                                E("alg::v(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::vbar(x__)"),
+                                E("alg::vbar(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::u(x__)"),
+                                E("alg::u(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::ubar(x__)"),
+                                E("alg::ubar(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::ϵ(x__)"),
+                                E("alg::ϵ(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::ϵbar(x__)"),
+                                E("alg::ϵbar(x__)"), repeat=True)
+            expr = expr.replace(E("spenso::mink(4,x_)"), E(
+                "spenso::mink(python::dim,x_)"), repeat=True)
+            expr = expr.replace(E("spenso::coad(8,x_)"), E(
+                "spenso::coad(alg::Nc^2-1,x_)"), repeat=True)
+            expr = expr.replace(E("spenso::cof(3,x_)"), E(
+                "spenso::cof(alg::Nc,x_)"), repeat=True)
+            return expr
+
+        numerator = curate(E_sp(graph_expr['expression']))
+        denominator = E("1")
+        for (p, m) in graph_expr['denominators'].items():
+            denominator = denominator * \
+                (S("symbolica_community::dot", is_linear=True,
+                 is_symmetric=True)(E_sp(p), E_sp(p)) - E_sp(m)**2)
+
+        e = numerator / denominator
+        if to_lmb:
+            for (src, trgt) in graph_expr['momenta'].items():
+                e = e.replace(E_sp(src), E_sp(trgt), repeat=True)
+
+        return e
+
+    def sum_square_left_right(self, left: dict[Any, Any], right: dict[Any, Any]) -> Any:
+        """Combine left and right expressions into a single expression."""
+        self.import_symbolica_community()
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot
+        from symbolica_community.algebraic_simplification import wrap_dummies, conj, simplify_color, simplify_gamma, to_dots
+        expressions = {'left': left, 'right': right}
+        for key in list(expressions.keys()):
+            side_expression = E("0")
+            for graph_id, graph_expr in expressions[key].items():
+                side_expression = side_expression + \
+                    self.build_graph_expression(graph_expr, to_lmb=True)
+            expressions[key] = side_expression
+
+        dim = S("python::dim")
+        mink = Representation.mink(dim)
+        Q = TensorStructure(mink, name=S("spenso::Q"))
+        P = TensorStructure(mink, name=S("spenso::P"))
+
+        def q(i, j):
+            return Q(i, ';', j)
+
+        def p(i, j):
+            return P(i, ';', j)
+
+        gamma = TensorStructure.gammadD(dim)
+        g = TensorStructure.metric(mink)
+
+        bis = Representation.bis(4)
+        u, ubar, v, vbar, eps, epsbar = S(
+            "alg::u", "alg::ubar", "alg::v", "alg::vbar", "alg::ϵ", "alg::ϵbar")
+        i_, j_, d_, a_, b_ = S("i_", "j_", "d_", "a_", "b_")
+        dummy = S("dummy")
+        l_side = S("l")
+        r_side = S("r")
+
+        left_e = wrap_dummies(expressions['left'], l_side)
+        right_e = conj(wrap_dummies(expressions['right'], r_side))
+        square = (left_e*right_e).expand()
+
+        # For now only sypport massless externals
+        spin_sum_rules = [
+            (
+                eps(i_, mink(l_side(a_)))*epsbar(i_, mink(r_side(a_))),
+                -g(l_side(a_), r_side(a_))
+            ),
+            (
+                eps(i_, mink(r_side(a_)))*epsbar(i_, mink(l_side(a_))),
+                -g(l_side(a_), r_side(a_))
+            ),
+            (
+                vbar(i_, bis(l_side(a_)))*v(i_, bis(r_side(a_))),
+                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                vbar(i_, bis(r_side(a_)))*v(i_, bis(l_side(a_))),
+                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                ubar(i_, bis(l_side(a_)))*u(j_, bis(r_side(a_))),
+                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                ubar(i_, bis(r_side(a_)))*u(j_, bis(l_side(a_))),
+                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+        ]
+
+        for src, trgt in spin_sum_rules:
+            square = square.replace(src, trgt, repeat=True)
+
+        def substitute_constants(input_e: Expression) -> Expression:
+            constants = [
+                (dim, E("4")),
+                (E("alg::TR"), E("1/2")),
+                (E("alg::Nc"), E("3")),
+                (E("alg::CF"), E("4/3")),
+                (E("alg::CA"), E("3")),
+            ]
+            for src, trgt in constants:
+                input_e = input_e.replace(src, trgt)
+            return input_e
+
+        square = simplify_color(square)
+        square = simplify_gamma(square)
+        square = to_dots(square)
+        square = substitute_constants(square)
+
+        return square
+
+    def build_matrix_element_expression(self, expressions: dict[Any, Any], mode=EvalMode) -> Any:
+
+        self.import_symbolica_community()
+        import symbolica_community as sc  # type: ignore # nopep8
+
+        match mode:
+            case EvalMode.TREExTREE:
+                me_expr = self.sum_square_left_right(
+                    expressions["tree"]["graph_expressions"], expressions["tree"]["graph_expressions"])
+                return me_expr
+
+            case EvalMode.LOOPxTREE:
+                raise MadLoop7Error(
+                    "Loop x tree matrix element expression building not implemented yet!")
+            case EvalMode.LOOPxLOOP:
+                raise MadLoop7Error(
+                    "Loop x loop matrix element expression building not implemented yet!")
+
+    def export_evaluator(self, process: HardCodedProcess, matrix_element_expression: Any, mode=EvalMode) -> None:
+        self.import_symbolica_community()
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+
+        madloop7_output = os.path.abspath(pjoin(self.config["output_path"], MADLOOP7_OUTPUT_DIR, process.name))  # nopep8
+        if not os.path.isdir(madloop7_output):
+            os.makedirs(madloop7_output)
+
+        dim = S("python::dim")
+        mink = Representation.mink(dim)
+        P = S("spenso::P")
+        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+        match mode:
+            case EvalMode.TREExTREE:
+
+                for i in range(process.n_external):
+                    for j in range(process.n_external):
+                        if i <= j:
+                            dot_param = E(f"dot_{i+1}_{j+1}")
+                            print(dot(P(i), P(j)).to_canonical_string(),
+                                  dot_param.to_canonical_string())
+                            matrix_element_expression = matrix_element_expression.replace(
+                                dot(P(i), P(j)), dot_param)
+
+                model_param_symbols = [s for s in matrix_element_expression.get_all_symbols(
+                    False) if not str(s).startswith("dot")]
+                model = get_model(process.model)
+                model_parameters = model.get('parameter_dict')
+                with open(pjoin(madloop7_output, "me_expression.txt"), "w") as f:
+                    f.write(matrix_element_expression.to_canonical_string())
+                shutil.copyfile(
+                    pjoin(root_path, "templates", "phase_space_generator.py"),
+                    pjoin(madloop7_output, "phase_space_generator.py"),
+                )
+                run_sa_template = open(
+                    pjoin(root_path, "templates", "run_sa.py"), 'r').read()
+                replace_dict = {
+                    'symbolica_community_path': self.config["symbolica_community_path"],
+                    'n_externals': process.n_external,
+                }
+                model_param_values = []
+                for p in model_param_symbols:
+                    model_param_values.append(
+                        (p, model_parameters[str(p).replace(
+                            'spenso::', '')].value)
+                    )
+                replace_dict['model_parameters'] = ',\n'.join(
+                    [f"(S(\"{p.to_canonical_string()}\"), {v})" for (p, v) in model_param_values])
+
+                with open(pjoin(madloop7_output, "run.py"), "w") as f:
+                    f.write(run_sa_template % replace_dict)
+
+            case EvalMode.LOOPxTREE:
+                raise MadLoop7Error(
+                    "Loop x tree matrix element expression evaluation not implemented yet!")
+            case EvalMode.LOOPxLOOP:
+                raise MadLoop7Error(
+                    "Loop x loop matrix element expression evaluation not implemented yet!")
+
+    def import_symbolica_community(self) -> None:
 
         if self.config["symbolica_community_path"] is not None:
             sc_path = os.path.abspath(
@@ -188,12 +453,18 @@ class MadLoop7(object):
                     "ERROR: Could not import Python's symbolica_community module.",
                     "Add '<SYMBOLICA_COMMUNITY_INSTALLATION_DIRECTORY>/python' to your PYTHONPATH or specify it under 'symbolica_community_path' in the configuration file used to load MadLoop7.",]))
 
+    def build_tensor_networks(self, expressions: dict[Any, Any], mode=EvalMode) -> Any:
+
+        self.import_symbolica_community()
+        import symbolica_community as sc  # type: ignore # nopep8
+
         logger.critical("TODO: Implement tensor network building with symbolica_community!:\n{}".format(
             pformat(expressions)))
         logger.critical("# Loop diagrams: {}".format(
             len(expressions["loop"]["graph_expressions"].keys())))
         logger.critical("# Tree diagrams: {}".format(
             len(expressions["tree"]["graph_expressions"].keys())))
+
         tensor_nets = None  # TODO!
 
         return tensor_nets
@@ -209,11 +480,11 @@ class MadLoop7(object):
         process = HARDCODED_PROCESSES[process_name]
 
         # Generate graphs if the madsymbolic output is not already present
-        if any(not os.path.isfile(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}.dot")) for graph_class in ['tree', 'loop']):
+        if any(not os.path.isfile(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}.dot")) for graph_class in process.get_graph_categories()):
             self.generate_process(process)
 
         # Now process the graph with gammaLoop and spenso to get the symbolic expression
-        if any(not os.path.isdir(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}")) for graph_class in ['tree', 'loop']):
+        if any(not os.path.isdir(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}")) for graph_class in process.get_graph_categories()):
             self.build_expressions_with_gammaloop(process)
 
         if not os.path.isdir(pjoin(self.config["output_path"], MADLOOP7_OUTPUT_DIR, f"{process.name}")):

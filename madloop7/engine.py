@@ -13,7 +13,6 @@ import subprocess
 import shutil
 from enum import Enum
 
-
 root_path = os.path.abspath(os.path.dirname(__file__))
 
 pjoin = os.path.join
@@ -178,8 +177,7 @@ class MadLoop7(object):
                 'graph_expressions': graph_expressions,
             }
 
-        logger.debug("Model replacements:\n{}".format(
-            pformat(model_replacements)))
+        # logger.debug("Model replacements:\n{}".format(pformat(model_replacements)))
 
         eval_mode = EvalMode.TREExTREE
         if expressions["loop"]["graph_expressions"] == {} and expressions["tree"]["graph_expressions"] == {}:
@@ -197,10 +195,9 @@ class MadLoop7(object):
         # stop
 
         matrix_element_expression = self.build_matrix_element_expression(
-            expressions,  eval_mode)
+            process, expressions,  eval_mode)
 
-        self.export_evaluator(
-            process, matrix_element_expression, eval_mode)
+        self.export_evaluator(process, matrix_element_expression, eval_mode)
         # tensor_nets = self.build_tensor_networks(expressions, eval_mode)
 
     def build_graph_expression(self, graph_expr: dict[Any, Any], to_lmb: bool = False) -> Any:
@@ -263,15 +260,9 @@ class MadLoop7(object):
         """Combine left and right expressions into a single expression."""
         self.import_symbolica_community()
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
-        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot
-        from symbolica_community.algebraic_simplification import wrap_dummies, conj, simplify_color, simplify_gamma, to_dots
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
+        from symbolica_community.algebraic_simplification import wrap_dummies, conj, simplify_color, simplify_gamma, to_dots  # type: ignore # nopep8
         expressions = {'left': left, 'right': right}
-        for key in list(expressions.keys()):
-            side_expression = E("0")
-            for graph_id, graph_expr in expressions[key].items():
-                side_expression = side_expression + \
-                    self.build_graph_expression(graph_expr, to_lmb=True)
-            expressions[key] = side_expression
 
         dim = S("python::dim")
         mink = Representation.mink(dim)
@@ -295,11 +286,37 @@ class MadLoop7(object):
         l_side = S("l")
         r_side = S("r")
 
-        left_e = wrap_dummies(expressions['left'], l_side)
-        right_e = conj(wrap_dummies(expressions['right'], r_side))
-        square = (left_e*right_e).expand()
+        SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY = True
 
-        # For now only sypport massless externals
+        terms = []
+        if not SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY:
+            for key in ['left', 'right']:
+                side_expression = E("0")
+                for _graph_id, graph_expr in sorted(expressions[key].items(), key=lambda x: x[0]):
+                    side_expression = side_expression + \
+                        self.build_graph_expression(graph_expr, to_lmb=True)
+                expressions[key] = side_expression
+
+            left_e = wrap_dummies(expressions['left'], l_side)
+            right_e = conj(wrap_dummies(expressions['right'], r_side))
+            terms.append((left_e*right_e).expand())
+        else:
+            diagram_expressions = {}
+            diagram_expressions['left'] = [
+                wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), l_side)
+                for _graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0])
+            ]
+            diagram_expressions['right'] = [
+                conj(wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), r_side))
+                for _graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0])
+            ]
+            for left_expr in diagram_expressions['left']:
+                for right_expr in diagram_expressions['right']:
+                    terms.append((left_expr*right_expr).expand())
+
+        # For now only support massless externals
         spin_sum_rules = [
             (
                 eps(i_, mink(l_side(a_)))*epsbar(i_, mink(r_side(a_))),
@@ -311,28 +328,25 @@ class MadLoop7(object):
             ),
             (
                 vbar(i_, bis(l_side(a_)))*v(i_, bis(r_side(a_))),
-                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
                 p(i_, dummy(i_, a_))
             ),
             (
                 vbar(i_, bis(r_side(a_)))*v(i_, bis(l_side(a_))),
-                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
                 p(i_, dummy(i_, a_))
             ),
             (
                 ubar(i_, bis(l_side(a_)))*u(j_, bis(r_side(a_))),
-                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
                 p(i_, dummy(i_, a_))
             ),
             (
                 ubar(i_, bis(r_side(a_)))*u(j_, bis(l_side(a_))),
-                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                -gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
                 p(i_, dummy(i_, a_))
             ),
         ]
-
-        for src, trgt in spin_sum_rules:
-            square = square.replace(src, trgt, repeat=True)
 
         def substitute_constants(input_e: Expression) -> Expression:
             constants = [
@@ -346,22 +360,34 @@ class MadLoop7(object):
                 input_e = input_e.replace(src, trgt)
             return input_e
 
-        square = simplify_color(square)
-        square = simplify_gamma(square)
-        square = to_dots(square)
-        square = substitute_constants(square)
+        final_result = E("0")
+        logger.info(
+            "Starting the processing of %d interference terms..." % len(terms))
+        for i_t, t in enumerate(terms):
+            print("Processing terms %-6d / %d " %
+                  (i_t, len(terms)), end="\r")
+            for src, trgt in spin_sum_rules:
+                t = t.replace(src, trgt, repeat=True)
 
-        return square
+            t = simplify_color(t)
+            t = simplify_gamma(t)
+            t = to_dots(t)
+            t = substitute_constants(t)
 
-    def build_matrix_element_expression(self, expressions: dict[Any, Any], mode=EvalMode) -> Any:
+            final_result = final_result + t
+
+        return final_result
+
+    def build_matrix_element_expression(self, process: HardCodedProcess, expressions: dict[Any, Any], mode: EvalMode) -> Any:
 
         self.import_symbolica_community()
-        import symbolica_community as sc  # type: ignore # nopep8
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
 
         match mode:
             case EvalMode.TREExTREE:
                 me_expr = self.sum_square_left_right(
                     expressions["tree"]["graph_expressions"], expressions["tree"]["graph_expressions"])
+                me_expr = me_expr * E(process.overall_factor)
                 return me_expr
 
             case EvalMode.LOOPxTREE:
@@ -371,9 +397,9 @@ class MadLoop7(object):
                 raise MadLoop7Error(
                     "Loop x loop matrix element expression building not implemented yet!")
 
-    def export_evaluator(self, process: HardCodedProcess, matrix_element_expression: Any, mode=EvalMode) -> None:
+    def export_evaluator(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
         self.import_symbolica_community()
-        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
 
         madloop7_output = os.path.abspath(pjoin(self.config["output_path"], MADLOOP7_OUTPUT_DIR, process.name))  # nopep8
@@ -387,12 +413,24 @@ class MadLoop7(object):
         match mode:
             case EvalMode.TREExTREE:
 
+                # Overall energy-momentum conservation
+                complement = E("0")
+                for i in range(process.n_external-1):
+                    if i < 2:
+                        complement = complement + P(i)
+                    else:
+                        complement = complement - P(i)
+                matrix_element_expression = matrix_element_expression.replace(
+                    P(process.n_external-1), complement)
+
                 for i in range(process.n_external):
                     for j in range(process.n_external):
                         if i <= j:
-                            dot_param = E(f"dot_{i+1}_{j+1}")
-                            print(dot(P(i), P(j)).to_canonical_string(),
-                                  dot_param.to_canonical_string())
+                            if i == j:
+                                # Only support massless
+                                dot_param = E("0")
+                            else:
+                                dot_param = E(f"dot_{i+1}_{j+1}")
                             matrix_element_expression = matrix_element_expression.replace(
                                 dot(P(i), P(j)), dot_param)
 
@@ -400,6 +438,8 @@ class MadLoop7(object):
                     False) if not str(s).startswith("dot")]
                 model = get_model(process.model)
                 model_parameters = model.get('parameter_dict')
+                matrix_element_expression = matrix_element_expression.expand().collect_factors()
+
                 with open(pjoin(madloop7_output, "me_expression.txt"), "w") as f:
                     f.write(matrix_element_expression.to_canonical_string())
                 shutil.copyfile(
@@ -414,9 +454,11 @@ class MadLoop7(object):
                 }
                 model_param_values = []
                 for p in model_param_symbols:
+                    p_name = str(p).replace('spenso::', '')
+                    if p_name not in model_parameters:
+                        p_name = f'mdl_{p_name}'
                     model_param_values.append(
-                        (p, model_parameters[str(p).replace(
-                            'spenso::', '')].value)
+                        (p, model_parameters[p_name].value)
                     )
                 replace_dict['model_parameters'] = ',\n'.join(
                     [f"(S(\"{p.to_canonical_string()}\"), {v})" for (p, v) in model_param_values])

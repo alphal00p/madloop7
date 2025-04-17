@@ -1,7 +1,9 @@
 from phase_space_generator import FlatInvertiblePhasespace as PSGen
+from phase_space_generator import LorentzVector, LorentzVectorList
 import sys
 import os
 import random
+import time
 
 pjoin = os.path.join
 
@@ -41,6 +43,7 @@ N_CORES = 1
 OPRIMIZATION_LEVEL = 3
 COMPILER = None  # '/opt/local/bin/gcc'
 N_SAMPLES = 2
+N_REPEATED_SAMPLES = 1_000_000
 SEED = 1337
 
 if __name__ == "__main__":
@@ -53,8 +56,10 @@ if __name__ == "__main__":
     params = []
     for i in range(N_EXTERNALS):
         for j in range(N_EXTERNALS):
+            params.append(E(f"dot_n{i+1}_{j+1}"))
             if i <= j:
                 params.append(E(f"dot_{i+1}_{j+1}"))
+                params.append(E(f"dot_n{i+1}_n{j+1}"))
 
     model_params = [mp[0] for mp in MODEL_PARAMS]
     model_params_values = [mp[1] for mp in MODEL_PARAMS]
@@ -71,18 +76,31 @@ if __name__ == "__main__":
                    beam_Es=[500., 500.],
                    beam_types=(0, 0))
 
+    print("Generating samples ...")
     random.seed(SEED)
     samples = []
     for i_s in range(N_SAMPLES):
         rv = [random.random() for _ in range(ps_gen.nDimPhaseSpace())]
         kinematics, _jac = ps_gen.generateKinematics(E_cm=1000., random_variables=rv)  # nopep8
-        print(kinematics)
+        print("> Sample #{}:\n{}".format(i_s, kinematics))
+        kinematics_n = LorentzVectorList([LorentzVector([
+            lv[0], -lv[1], -lv[2], -lv[3]]) for lv in kinematics])
         param_inputs = []
         for i in range(N_EXTERNALS):
             for j in range(N_EXTERNALS):
+                param_inputs.append(kinematics_n[i].dot(kinematics[j]))
                 if i <= j:
                     param_inputs.append(kinematics[i].dot(kinematics[j]))
+                    param_inputs.append(kinematics_n[i].dot(kinematics_n[j]))
         param_inputs += model_params_values
         samples.append(param_inputs)
 
-    print(compiled_evaluator.evaluate_complex(samples))
+    samples.extend([samples[-1],]*N_REPEATED_SAMPLES)
+    print("Starting evaluations ...")
+    t_start = time.time()
+    results = compiled_evaluator.evaluate_complex(samples)
+    t_tot = time.time() - t_start
+    for i_s in range(N_SAMPLES):
+        print("> Result for sample #{}: {}".format(i_s, results[i_s][0]))
+    print("Time per sample: {:.3f} mus".format(
+          ((t_tot / (N_SAMPLES + N_REPEATED_SAMPLES)) * 1_000_000)))

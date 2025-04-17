@@ -134,7 +134,7 @@ HARDCODED_PROCESSES = {
         overall_factor="1/(8*8*2*2)",
     ),
     'gg_ddxg_madgraph': HardCodedProcess(
-        name='gg_ddx_madgraph',
+        name='gg_ddxg_madgraph',
         model="sm-no_widths",
         madgraph_generation="""
             generate g g > d d~ g / u c s b t
@@ -143,6 +143,19 @@ HARDCODED_PROCESSES = {
         gamma_loop_generation=None,
         madsymbolic_output=[
             ("tree", "tree_amplitude_1_gg_ddxg_no_ucsbt.yaml"),
+        ],
+        overall_factor="1/(8*8*2*2)",
+    ),
+    'gg_ddxgg_madgraph': HardCodedProcess(
+        name='gg_ddxgg_madgraph',
+        model="sm-no_widths",
+        madgraph_generation="""
+            generate g g > d d~ g g / u c s b t
+        """,
+        n_external=5,
+        gamma_loop_generation=None,
+        madsymbolic_output=[
+            ("tree", "tree_amplitude_1_gg_ddxgg_no_ucsbt.yaml"),
         ],
         overall_factor="1/(8*8*2*2)",
     ),

@@ -266,14 +266,20 @@ class MadLoop7(object):
 
         dim = S("python::dim")
         mink = Representation.mink(dim)
+        P_symbol = S("spenso::P")
+        N_symbol = S("spenso::N")
         Q = TensorStructure(mink, name=S("spenso::Q"))
-        P = TensorStructure(mink, name=S("spenso::P"))
+        P = TensorStructure(mink, name=P_symbol)
+        N = TensorStructure(mink, name=N_symbol)
 
         def q(i, j):
             return Q(i, ';', j)
 
         def p(i, j):
             return P(i, ';', j)
+
+        def n(i, j):
+            return N(i, ';', j)
 
         gamma = TensorStructure.gammadD(dim)
         g = TensorStructure.metric(mink)
@@ -285,8 +291,10 @@ class MadLoop7(object):
         dummy = S("dummy")
         l_side = S("l")
         r_side = S("r")
+        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
 
         SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY = True
+        PHYSICAL_VECTOR_SUM_RULE = True
 
         terms = []
         if not SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY:
@@ -317,14 +325,22 @@ class MadLoop7(object):
                     terms.append((left_expr*right_expr).expand())
 
         # For now only support massless externals
+        if PHYSICAL_VECTOR_SUM_RULE:
+            transverse_physical_vector_sum = (
+                p(i_, l_side(a_)) * n(i_, r_side(a_)) +
+                n(i_, l_side(a_)) * p(i_, r_side(a_))
+            ) / dot(N_symbol(i_), P_symbol(i_))
+        else:
+            transverse_physical_vector_sum = E("0")
+
         spin_sum_rules = [
             (
                 eps(i_, mink(l_side(a_)))*epsbar(i_, mink(r_side(a_))),
-                -g(l_side(a_), r_side(a_))
+                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
             ),
             (
                 eps(i_, mink(r_side(a_)))*epsbar(i_, mink(l_side(a_))),
-                -g(l_side(a_), r_side(a_))
+                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
             ),
             (
                 vbar(i_, bis(l_side(a_)))*v(i_, bis(r_side(a_))),
@@ -409,22 +425,30 @@ class MadLoop7(object):
         dim = S("python::dim")
         mink = Representation.mink(dim)
         P = S("spenso::P")
+        N = S("spenso::N")
         dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
         match mode:
             case EvalMode.TREExTREE:
 
                 # Overall energy-momentum conservation
-                complement = E("0")
-                for i in range(process.n_external-1):
-                    if i < 2:
-                        complement = complement + P(i)
-                    else:
-                        complement = complement - P(i)
-                matrix_element_expression = matrix_element_expression.replace(
-                    P(process.n_external-1), complement)
+                # complement = E("0")
+                # complement_n = E("0")
+                # for i in range(process.n_external-1):
+                #     if i < 2:
+                #         complement = complement + P(i)
+                #         complement_n = complement_n + N(i)
+                #     else:
+                #         complement = complement - P(i)
+                #         complement_n = complement_n - N(i)
+                # matrix_element_expression = matrix_element_expression.replace(
+                #     P(process.n_external-1), complement)
+                # matrix_element_expression = matrix_element_expression.replace(
+                #     N(process.n_external-1), complement_n)
 
                 for i in range(process.n_external):
                     for j in range(process.n_external):
+                        matrix_element_expression = matrix_element_expression.replace(
+                            dot(N(i), P(j)), E(f"dot_n{i+1}_{j+1}"))
                         if i <= j:
                             if i == j:
                                 # Only support massless
@@ -433,6 +457,8 @@ class MadLoop7(object):
                                 dot_param = E(f"dot_{i+1}_{j+1}")
                             matrix_element_expression = matrix_element_expression.replace(
                                 dot(P(i), P(j)), dot_param)
+                            matrix_element_expression = matrix_element_expression.replace(
+                                dot(N(i), N(j)), E(f"dot_n{i+1}_n{j+1}"))
 
                 model_param_symbols = [s for s in matrix_element_expression.get_all_symbols(
                     False) if not str(s).startswith("dot")]

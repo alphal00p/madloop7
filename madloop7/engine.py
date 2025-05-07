@@ -17,7 +17,7 @@ root_path = os.path.abspath(os.path.dirname(__file__))
 
 pjoin = os.path.join
 
-MADSYMBOLIC_OUTPUT_DIR = "madsymbolic_outputs"
+graphs_output_DIR = "graphs_outputs"
 MADGRAPH_OUTPUT_DIR = "madgraph_outputs"
 GAMMALOOP_OUTPUT_DIR = "gammaloop_outputs"
 MADLOOP7_OUTPUT_DIR = "madloop7_outputs"
@@ -30,6 +30,35 @@ class EvalMode(Enum):
     LOOPxLOOP = "loop-induced"
 
 
+class EvaluationStrategy(Enum):
+    """Evaluation strategies for MadLoop7."""
+    ONLY_DOT_PRODUCTS = "only_dot_products"
+    TENSOR_NETWORKS = "tensor_networks"
+
+    def __str__(self) -> str:
+        return self.value
+
+    def __repr__(self) -> str:
+        return self.value
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, EvaluationStrategy):
+            return self.value == other.value
+        elif isinstance(other, str):
+            return self.value == other
+        return False
+
+    @classmethod
+    def from_string(cls, value: str) -> "EvaluationStrategy":
+        match value:
+            case "only_dot_products":
+                return EvaluationStrategy.ONLY_DOT_PRODUCTS
+            case "tensor_networks":
+                return EvaluationStrategy.TENSOR_NETWORKS
+            case _:
+                raise ValueError(f"Invalid evaluation strategy: {value}")
+
+
 class MadLoop7(object):
 
     def __init__(self, config_path: str) -> None:
@@ -37,23 +66,72 @@ class MadLoop7(object):
             self.config = yaml.safe_load(f)
 
     def generate_process_gamma_loop(self, process: HardCodedProcess) -> None:
-        logger.critical("GammaLoop generation not implemented yet")
-        pass
+        assert process.gamma_loop_generation is not None
+        assert process.graphs_output is not None
+        logger.info(f"Generating process {process.name} with GammaLoop (feyngen)...")  # nopep8
+        process_card = os.path.abspath(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}.gL"))  # nopep8
+        graph_outputs = [
+            (
+                graph_class,
+                generation_cmds,
+                os.path.abspath(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}.dot"))  # nopep8
+             )  # nopep8
+            for (generation_cmds, (graph_class, _)) in zip(process.gamma_loop_generation, process.graphs_output)
+        ]
+        with open(process_card, "w") as f:
+            logger.debug(f"Writing gammaloop process generation card to '{process_card}'")  # nopep8
+            f.write("\n".join(
+                [
+                    f"import_model {process.model}",
+                ]
+                + ['\n',]
+                + [
+                    "\n".join([
+                        "\n".join(l.strip()+(' --clear_existing_processes --graph_prefix GL_' if i == len(generation_cmds.strip().split(
+                            '\n'))-1 else '') for i, l in enumerate(generation_cmds.strip().split('\n'))),
+                        f"export_graphs {dot_output}",  # nopep8
+                    ])
+                    for (_graph_class, generation_cmds, dot_output) in graph_outputs
+                ]
+            ))
+
+        logger.debug(f"Running gammaloop graph generation...")
+        process_handle = subprocess.Popen(
+            ["./bin/gammaloop", process_card],
+            stdout=None if logger.level <= logging.DEBUG else subprocess.PIPE,
+            stderr=None if logger.level <= logging.DEBUG else subprocess.PIPE,
+            cwd=self.config["gammaloop_path"]
+        )
+
+        if logger.level > logging.DEBUG:
+            stdout, stderr = process_handle.communicate()
+            gl_output = f"stdout:\n{stdout.decode()}\nstderr:\n{stderr.decode()}"  # nopep8
+        else:
+            process_handle.wait()
+            gl_output = "<DEBUG MODE: see terminal>"
+
+        for (_graph_class, generation_cmds, dot_output) in graph_outputs:
+            if not os.path.isfile(dot_output):
+                raise MadLoop7Error(
+                    f"GammaLoop generation failed for process {process.name}:\n{gl_output}")
+
+        logger.info(f"Process {process.name} generated.")
+        logger.debug(f"GammaLoop output:\n{gl_output}")
 
     def generate_process_madgraph(self, process: HardCodedProcess) -> None:
         assert process.madgraph_generation is not None
-        assert process.madsymbolic_output is not None
+        assert process.graphs_output is not None
         logger.info(f"Generating process {process.name} with MG5aMC...")  # nopep8
         process_card = os.path.abspath(pjoin(self.config["output_path"], MADGRAPH_OUTPUT_DIR, f"{process.name}.mg5"))  # nopep8
-        yaml_graph_outputs = os.path.abspath(pjoin(self.config["output_path"], MADSYMBOLIC_OUTPUT_DIR, f"{process.name}"))  # nopep8
+        yaml_graph_outputs = os.path.abspath(pjoin(self.config["output_path"], graphs_output_DIR, f"{process.name}"))  # nopep8
         madgraph_output = os.path.abspath(pjoin(self.config["output_path"], MADGRAPH_OUTPUT_DIR, process.name))  # nopep8
         graph_outputs = [
             (
                 graph_class,
-                os.path.abspath(pjoin(self.config["output_path"], MADSYMBOLIC_OUTPUT_DIR, process.name, ms_output)),  # nopep8
+                os.path.abspath(pjoin(self.config["output_path"], graphs_output_DIR, process.name, ms_output)),  # nopep8
                 os.path.abspath(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, f"{process.name}_{graph_class}.dot"))  # nopep8
              )  # nopep8
-            for (graph_class, ms_output) in process.madsymbolic_output
+            for (graph_class, ms_output) in process.graphs_output
         ]
         with open(process_card, "w") as f:
             logger.debug(f"Writing MG5aMC process generation card to '{process_card}'")  # nopep8
@@ -69,10 +147,10 @@ class MadLoop7(object):
                 ]
                 + [
                     "\n".join([
-                        f"gL import_graphs {madsymbolic_output} --format yaml",  # nopep8
+                        f"gL import_graphs {graphs_output} --format yaml",  # nopep8
                         f"gL export_graphs {dot_output}",  # nopep8
                     ])
-                    for (_graph_class, madsymbolic_output, dot_output) in graph_outputs
+                    for (_graph_class, graphs_output, dot_output) in graph_outputs
                 ]
             ))
         logger.debug(f"Running MG5aMC generation...")
@@ -90,7 +168,7 @@ class MadLoop7(object):
             process_handle.wait()
             mg_output = "<DEBUG MODE: see terminal>"
 
-        for (_graph_class, _madsymbolic_output, dot_output) in graph_outputs:
+        for (_graph_class, _graphs_output, dot_output) in graph_outputs:
             if not os.path.isfile(dot_output):
                 raise MadLoop7Error(
                     f"MadGraph generation failed for process {process.name}:\n{mg_output}")
@@ -108,19 +186,8 @@ class MadLoop7(object):
 
     def build_expressions_with_gammaloop(self, process: HardCodedProcess) -> None:
         logger.info("Build diagram expressions with GammaLoop...")
-
-        try:
-            from gammaloop.interface.gammaloop_interface import GammaLoop, CommandList  # type: ignore # nopep8
-        except:
-            gammaloop_path = pjoin(self.config["gammaloop_path"], "python")
-            if gammaloop_path not in sys.path:
-                sys.path.insert(0, gammaloop_path)
-            try:
-                from gammaloop.interface.gammaloop_interface import GammaLoop, CommandList  # type: ignore # nopep8
-            except:
-                raise MadLoop7Error('\n'.join([
-                    "ERROR: Could not import Python's gammaloop module.",
-                    "Add '<GAMMALOOP_INSTALLATION_DIRECTORY>/python' to your PYTHONPATH or specify it under 'gammaloop_path' in the configuration file used to load MadLoop7.",]))
+        self.import_gammaloop()
+        from gammaloop.interface.gammaloop_interface import GammaLoop, CommandList  # type: ignore # nopep8
 
         for graph_class in process.get_graph_categories():
             graphs = os.path.abspath(
@@ -141,8 +208,28 @@ class MadLoop7(object):
                 raise MadLoop7Error(
                     f"GammaLoop failed for process {process.name}")
 
-    def build_evaluators_with_spenso(self, process: HardCodedProcess, tree_graph_ids: list[int] | None = None, loop_graph_ids: list[int] | None = None) -> None:
-        logger.info("Build graph evaluators with spenso...")
+    def build_evaluators_with_spenso(self, process: HardCodedProcess, tree_graph_ids: list[int] | None = None, loop_graph_ids: list[int] | None = None, evaluation_strategy: EvaluationStrategy | None = None) -> None:
+
+        logger.info("Build graph evaluators with spenso and strategy '%s'...", str(evaluation_strategy))  # nopep8
+
+        self.import_symbolica_community()
+        from symbolica_community import E  # type: ignore # nopep8
+
+        def evaluate_graph_overall_factor(overall_factor: E) -> E:
+            for header in ["AutG",
+                           "CouplingsMultiplicity",
+                           "InternalFermionLoopSign",
+                           "ExternalFermionOrderingSign",
+                           "AntiFermionSpinSumSign",
+                           "NumeratorIndependentSymmetryGrouping"]:
+                overall_factor = overall_factor.replace(
+                    E(f"{header}(x_)"), E("x_"), repeat=True)
+            overall_factor = overall_factor.replace(
+                E("NumeratorDependentGrouping(GraphId_,ratio_,GraphSymmetryFactor_)"), E("ratio_*GraphSymmetryFactor_"), repeat=True)
+            return overall_factor.expand().collect_num()
+
+        if evaluation_strategy is None:
+            evaluation_strategy = EvaluationStrategy.TENSOR_NETWORKS
 
         expressions: dict[Any, Any] = {}
         for graph_class in ['tree', 'loop']:
@@ -161,6 +248,7 @@ class MadLoop7(object):
 
             graph_expressions = {}
             for graph_expr_path in os.listdir(pjoin(self.config["output_path"], GAMMALOOP_OUTPUT_DIR, output_name, "sources", output_metadata["output_type"], output_metadata["contents"][0], "expressions")):
+                print(graph_expr_path)
                 graph_id = int(graph_expr_path.split("_")[-2])
                 graph_ids = tree_graph_ids if graph_class == "tree" else loop_graph_ids
                 if graph_ids is None or graph_id in graph_ids:
@@ -168,8 +256,9 @@ class MadLoop7(object):
                         expr = json.load(f)
                         graph_expressions[graph_id] = {
                             'expression': expr[0],
-                            'momenta': dict(expr[1]),
-                            'denominators': dict(expr[2]),
+                            'overall_factor': evaluate_graph_overall_factor(E(expr[1])),
+                            'momenta': dict(expr[2]),
+                            'denominators': dict(expr[3]),
                         }
 
             expressions[graph_class] = {
@@ -193,12 +282,19 @@ class MadLoop7(object):
         # print((S("TTT", is_linear=True, is_symmetric=True)(
         #     E("x+y"), E("x+y"))**-1).expand().to_canonical_string())
         # stop
-
-        matrix_element_expression = self.build_matrix_element_expression(
-            process, expressions,  eval_mode)
-
-        self.export_evaluator(process, matrix_element_expression, eval_mode)
-        # tensor_nets = self.build_tensor_networks(expressions, eval_mode)
+        match evaluation_strategy:
+            case EvaluationStrategy.ONLY_DOT_PRODUCTS:
+                logger.info("Building evaluator with only dot products...")
+                matrix_element_expression = self.build_matrix_element_expression_only_dots(
+                    process, expressions,  eval_mode)
+                self.export_evaluator_only_dots(
+                    process, matrix_element_expression, eval_mode)
+            case EvaluationStrategy.TENSOR_NETWORKS:
+                logger.info("Building evaluator with tensor networks...")
+                matrix_element_expression = self.build_matrix_element_expression_tensor_networks(
+                    process, expressions,  eval_mode)
+                self.export_evaluator_tensor_networks(
+                    process, matrix_element_expression, eval_mode)
 
     def build_graph_expression(self, graph_expr: dict[Any, Any], to_lmb: bool = False) -> Any:
         """Build the graph expression from the graph expression dictionary."""
@@ -256,7 +352,7 @@ class MadLoop7(object):
 
         return e
 
-    def sum_square_left_right(self, left: dict[Any, Any], right: dict[Any, Any]) -> Any:
+    def sum_square_left_right_only_dots(self, left: dict[Any, Any], right: dict[Any, Any]) -> Any:
         """Combine left and right expressions into a single expression."""
         self.import_symbolica_community()
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
@@ -311,17 +407,17 @@ class MadLoop7(object):
         else:
             diagram_expressions = {}
             diagram_expressions['left'] = [
-                wrap_dummies(self.build_graph_expression(
-                    graph_expr, to_lmb=True), l_side)
-                for _graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0])
+                (graph_id, wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), l_side))
+                for graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0])
             ]
             diagram_expressions['right'] = [
-                conj(wrap_dummies(self.build_graph_expression(
-                    graph_expr, to_lmb=True), r_side))
-                for _graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0])
+                (graph_id, conj(wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), r_side)))
+                for graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0])
             ]
-            for left_expr in diagram_expressions['left']:
-                for right_expr in diagram_expressions['right']:
+            for left_id, left_expr in diagram_expressions['left']:
+                for right_id, right_expr in diagram_expressions['right']:
                     terms.append((left_expr*right_expr).expand())
 
         # For now only support massless externals
@@ -384,8 +480,13 @@ class MadLoop7(object):
                   (i_t, len(terms)), end="\r")
             for src, trgt in spin_sum_rules:
                 t = t.replace(src, trgt, repeat=True)
-
+            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_color_simplify.txt', 'w') as f:
+            #     f.write(t.to_canonical_string())
+            # print("Simplifying_color...")
             t = simplify_color(t)
+            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_gamma_simplify.txt', 'w') as f:
+            #     f.write(t.to_canonical_string())
+            # print("Simplifying_gamma...")
             t = simplify_gamma(t)
             t = to_dots(t)
             t = substitute_constants(t)
@@ -394,14 +495,14 @@ class MadLoop7(object):
 
         return final_result
 
-    def build_matrix_element_expression(self, process: HardCodedProcess, expressions: dict[Any, Any], mode: EvalMode) -> Any:
+    def build_matrix_element_expression_only_dots(self, process: HardCodedProcess, expressions: dict[Any, Any], mode: EvalMode) -> Any:
 
         self.import_symbolica_community()
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
 
         match mode:
             case EvalMode.TREExTREE:
-                me_expr = self.sum_square_left_right(
+                me_expr = self.sum_square_left_right_only_dots(
                     expressions["tree"]["graph_expressions"], expressions["tree"]["graph_expressions"])
                 me_expr = me_expr * E(process.overall_factor)
                 return me_expr
@@ -413,7 +514,255 @@ class MadLoop7(object):
                 raise MadLoop7Error(
                     "Loop x loop matrix element expression building not implemented yet!")
 
-    def export_evaluator(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
+    def export_evaluator_only_dots(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
+        self.import_symbolica_community()
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+
+        madloop7_output = os.path.abspath(pjoin(self.config["output_path"], MADLOOP7_OUTPUT_DIR, process.name))  # nopep8
+        if not os.path.isdir(madloop7_output):
+            os.makedirs(madloop7_output)
+
+        dim = S("python::dim")
+        mink = Representation.mink(dim)
+        P = S("spenso::P")
+        N = S("spenso::N")
+        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+        match mode:
+            case EvalMode.TREExTREE:
+
+                # Overall energy-momentum conservation
+                # complement = E("0")
+                # complement_n = E("0")
+                # for i in range(process.n_external-1):
+                #     if i < 2:
+                #         complement = complement + P(i)
+                #         complement_n = complement_n + N(i)
+                #     else:
+                #         complement = complement - P(i)
+                #         complement_n = complement_n - N(i)
+                # matrix_element_expression = matrix_element_expression.replace(
+                #     P(process.n_external-1), complement)
+                # matrix_element_expression = matrix_element_expression.replace(
+                #     N(process.n_external-1), complement_n)
+
+                for i in range(process.n_external):
+                    for j in range(process.n_external):
+                        matrix_element_expression = matrix_element_expression.replace(
+                            dot(N(i), P(j)), E(f"dot_n{i+1}_{j+1}"))
+                        if i <= j:
+                            if i == j:
+                                # Only support massless
+                                dot_param = E("0")
+                            else:
+                                dot_param = E(f"dot_{i+1}_{j+1}")
+                            matrix_element_expression = matrix_element_expression.replace(
+                                dot(P(i), P(j)), dot_param)
+                            matrix_element_expression = matrix_element_expression.replace(
+                                dot(N(i), N(j)), E(f"dot_n{i+1}_n{j+1}"))
+
+                model_param_symbols = [s for s in matrix_element_expression.get_all_symbols(
+                    False) if not str(s).startswith("dot")]
+                model = get_model(process.model)
+                model_parameters = model.get('parameter_dict')
+                matrix_element_expression = matrix_element_expression.expand().collect_factors()
+
+                with open(pjoin(madloop7_output, "me_expression.txt"), "w") as f:
+                    f.write(matrix_element_expression.to_canonical_string())
+                shutil.copyfile(
+                    pjoin(root_path, "templates", "phase_space_generator.py"),
+                    pjoin(madloop7_output, "phase_space_generator.py"),
+                )
+                run_sa_template = open(
+                    pjoin(root_path, "templates", "run_sa_only_dots.py"), 'r').read()
+                replace_dict = {
+                    'symbolica_community_path': self.config["symbolica_community_path"],
+                    'n_externals': process.n_external,
+                }
+                model_param_values = []
+                for p in model_param_symbols:
+                    p_name = str(p).replace('spenso::', '')
+                    if p_name not in model_parameters:
+                        p_name = f'mdl_{p_name}'
+                    model_param_values.append(
+                        (p, model_parameters[p_name].value)
+                    )
+                replace_dict['model_parameters'] = ',\n'.join(
+                    [f"(S(\"{p.to_canonical_string()}\"), {v})" for (p, v) in model_param_values])
+
+                with open(pjoin(madloop7_output, "run.py"), "w") as f:
+                    f.write(run_sa_template % replace_dict)
+
+            case EvalMode.LOOPxTREE:
+                raise MadLoop7Error(
+                    "Loop x tree matrix element expression evaluation not implemented yet!")
+            case EvalMode.LOOPxLOOP:
+                raise MadLoop7Error(
+                    "Loop x loop matrix element expression evaluation not implemented yet!")
+
+    def sum_square_left_right_tensor_networks(self, left: dict[Any, Any], right: dict[Any, Any]) -> Any:
+        """Combine left and right expressions into a single expression."""
+        self.import_symbolica_community()
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
+        from symbolica_community.algebraic_simplification import wrap_dummies, conj, simplify_color, simplify_gamma, to_dots  # type: ignore # nopep8
+        expressions = {'left': left, 'right': right}
+
+        dim = S("python::dim")
+        mink = Representation.mink(dim)
+        P_symbol = S("spenso::P")
+        N_symbol = S("spenso::N")
+        Q = TensorStructure(mink, name=S("spenso::Q"))
+        P = TensorStructure(mink, name=P_symbol)
+        N = TensorStructure(mink, name=N_symbol)
+
+        def q(i, j):
+            return Q(i, ';', j)
+
+        def p(i, j):
+            return P(i, ';', j)
+
+        def n(i, j):
+            return N(i, ';', j)
+
+        gamma = TensorStructure.gammadD(dim)
+        g = TensorStructure.metric(mink)
+
+        bis = Representation.bis(4)
+        u, ubar, v, vbar, eps, epsbar = S(
+            "alg::u", "alg::ubar", "alg::v", "alg::vbar", "alg::ϵ", "alg::ϵbar")
+        i_, j_, d_, a_, b_ = S("i_", "j_", "d_", "a_", "b_")
+        dummy = S("dummy")
+        l_side = S("l")
+        r_side = S("r")
+        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+
+        SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY = True
+        PHYSICAL_VECTOR_SUM_RULE = True
+
+        terms = []
+        if not SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY:
+            for key in ['left', 'right']:
+                side_expression = E("0")
+                for _graph_id, graph_expr in sorted(expressions[key].items(), key=lambda x: x[0]):
+                    side_expression = side_expression + \
+                        self.build_graph_expression(graph_expr, to_lmb=True)
+                expressions[key] = side_expression
+
+            left_e = wrap_dummies(expressions['left'], l_side)
+            right_e = conj(wrap_dummies(expressions['right'], r_side))
+            terms.append((left_e*right_e).expand())
+        else:
+            diagram_expressions = {}
+            diagram_expressions['left'] = [
+                (graph_id, wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), l_side))
+                for graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0])
+            ]
+            diagram_expressions['right'] = [
+                (graph_id, conj(wrap_dummies(self.build_graph_expression(
+                    graph_expr, to_lmb=True), r_side)))
+                for graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0])
+            ]
+            for left_id, left_expr in diagram_expressions['left']:
+                for right_id, right_expr in diagram_expressions['right']:
+                    terms.append((left_expr*right_expr).expand())
+
+        # For now only support massless externals
+        if PHYSICAL_VECTOR_SUM_RULE:
+            transverse_physical_vector_sum = (
+                p(i_, l_side(a_)) * n(i_, r_side(a_)) +
+                n(i_, l_side(a_)) * p(i_, r_side(a_))
+            ) / dot(N_symbol(i_), P_symbol(i_))
+        else:
+            transverse_physical_vector_sum = E("0")
+
+        spin_sum_rules = [
+            (
+                eps(i_, mink(l_side(a_)))*epsbar(i_, mink(r_side(a_))),
+                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
+            ),
+            (
+                eps(i_, mink(r_side(a_)))*epsbar(i_, mink(l_side(a_))),
+                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
+            ),
+            (
+                vbar(i_, bis(l_side(a_)))*v(i_, bis(r_side(a_))),
+                gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                vbar(i_, bis(r_side(a_)))*v(i_, bis(l_side(a_))),
+                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                ubar(i_, bis(l_side(a_)))*u(j_, bis(r_side(a_))),
+                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+            (
+                ubar(i_, bis(r_side(a_)))*u(j_, bis(l_side(a_))),
+                -gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
+                p(i_, dummy(i_, a_))
+            ),
+        ]
+
+        def substitute_constants(input_e: Expression) -> Expression:
+            constants = [
+                (dim, E("4")),
+                (E("alg::TR"), E("1/2")),
+                (E("alg::Nc"), E("3")),
+                (E("alg::CF"), E("4/3")),
+                (E("alg::CA"), E("3")),
+            ]
+            for src, trgt in constants:
+                input_e = input_e.replace(src, trgt)
+            return input_e
+
+        final_result = E("0")
+        logger.info(
+            "Starting the processing of %d interference terms..." % len(terms))
+        for i_t, t in enumerate(terms):
+            print("Processing terms %-6d / %d " %
+                  (i_t, len(terms)), end="\r")
+            for src, trgt in spin_sum_rules:
+                t = t.replace(src, trgt, repeat=True)
+            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_color_simplify.txt', 'w') as f:
+            #     f.write(t.to_canonical_string())
+            # print("Simplifying_color...")
+            t = simplify_color(t)
+            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_gamma_simplify.txt', 'w') as f:
+            #     f.write(t.to_canonical_string())
+            # print("Simplifying_gamma...")
+            t = simplify_gamma(t)
+            t = to_dots(t)
+            t = substitute_constants(t)
+
+            final_result = final_result + t
+
+        return final_result
+
+    def build_matrix_element_expression_tensor_networks(self, process: HardCodedProcess, expressions: dict[Any, Any], mode: EvalMode) -> Any:
+
+        self.import_symbolica_community()
+        from symbolica_community import Expression, S, E  # type: ignore # nopep8
+
+        match mode:
+            case EvalMode.TREExTREE:
+                me_expr = self.sum_square_left_right_tensor_networks(
+                    expressions["tree"]["graph_expressions"], expressions["tree"]["graph_expressions"])
+                me_expr = me_expr * E(process.overall_factor)
+                return me_expr
+
+            case EvalMode.LOOPxTREE:
+                raise MadLoop7Error(
+                    "Loop x tree matrix element expression building not implemented yet!")
+            case EvalMode.LOOPxLOOP:
+                raise MadLoop7Error(
+                    "Loop x loop matrix element expression building not implemented yet!")
+
+    def export_evaluator_tensor_networks(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
         self.import_symbolica_community()
         from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
@@ -521,25 +870,36 @@ class MadLoop7(object):
                     "ERROR: Could not import Python's symbolica_community module.",
                     "Add '<SYMBOLICA_COMMUNITY_INSTALLATION_DIRECTORY>/python' to your PYTHONPATH or specify it under 'symbolica_community_path' in the configuration file used to load MadLoop7.",]))
 
-    def build_tensor_networks(self, expressions: dict[Any, Any], mode=EvalMode) -> Any:
+    def import_gammaloop(self) -> None:
+        if self.config["gammaloop_path"] is not None:
+            sc_path = os.path.abspath(
+                pjoin(self.config["gammaloop_path"], "python"))
+            if sc_path not in sys.path:
+                sys.path.insert(0, sc_path)
+            try:
+                from gammaloop.interface.gammaloop_interface import GammaLoop, CommandList  # type: ignore # nopep8
+            except:
+                raise MadLoop7Error('\n'.join([
+                    "ERROR: Could not import Python's gammaloop module from {}".format(
+                        self.config["symbolica_community_path"]),
+                    "Add '<SYMBOLICA_COMMUNITY_INSTALLATION_DIRECTORY>' to your PYTHONPATH or specify it under 'gammaloop_path' in the configuration file used to load MadLoop7.",]))
+        else:
+            try:
+                from gammaloop.interface.gammaloop_interface import GammaLoop, CommandList  # type: ignore # nopep8
+            except:
+                raise MadLoop7Error('\n'.join([
+                    "ERROR: Could not import Python's gammaloop module.",
+                    "Add '<SYMBOLICA_COMMUNITY_INSTALLATION_DIRECTORY>/python' to your PYTHONPATH or specify it under 'gammaloop_path' in the configuration file used to load MadLoop7.",]))
 
-        self.import_symbolica_community()
-        import symbolica_community as sc  # type: ignore # nopep8
+    def generate(self, process_name: str = "NOT_SPECIFIED", tree_graph_ids: list[int] | None = None, loop_graph_ids: list[int] | None = None, evaluation_strategy: str | None = None, **_opts) -> Any:
 
-        logger.critical("TODO: Implement tensor network building with symbolica_community!:\n{}".format(
-            pformat(expressions)))
-        logger.critical("# Loop diagrams: {}".format(
-            len(expressions["loop"]["graph_expressions"].keys())))
-        logger.critical("# Tree diagrams: {}".format(
-            len(expressions["tree"]["graph_expressions"].keys())))
+        if evaluation_strategy is None:
+            madloop7_evaluation_strategy = EvaluationStrategy.TENSOR_NETWORKS
+        else:
+            madloop7_evaluation_strategy = EvaluationStrategy.from_string(
+                evaluation_strategy)
 
-        tensor_nets = None  # TODO!
-
-        return tensor_nets
-
-    def generate(self, process_name: str = "NOT_SPECIFIED", tree_graph_ids: list[int] | None = None, loop_graph_ids: list[int] | None = None, **_opts) -> Any:
-
-        for dir in [MADGRAPH_OUTPUT_DIR, MADSYMBOLIC_OUTPUT_DIR, GAMMALOOP_OUTPUT_DIR, MADLOOP7_OUTPUT_DIR]:
+        for dir in [MADGRAPH_OUTPUT_DIR, graphs_output_DIR, GAMMALOOP_OUTPUT_DIR, MADLOOP7_OUTPUT_DIR]:
             if not os.path.isdir(pjoin(self.config["output_path"], dir)):
                 os.makedirs(pjoin(self.config["output_path"], dir))
 
@@ -557,14 +917,14 @@ class MadLoop7(object):
 
         if not os.path.isdir(pjoin(self.config["output_path"], MADLOOP7_OUTPUT_DIR, f"{process.name}")):
             self.build_evaluators_with_spenso(
-                process, tree_graph_ids, loop_graph_ids)
+                process, tree_graph_ids, loop_graph_ids, madloop7_evaluation_strategy)
 
         logger.info(f"Process generation for {process_name} completed.")
 
     def clean(self, process_name: str) -> None:
         for graph_class in ['', '_tree', '_loop']:
             output_name = f"{process_name}{graph_class}"
-            for dir in [MADGRAPH_OUTPUT_DIR, MADSYMBOLIC_OUTPUT_DIR, GAMMALOOP_OUTPUT_DIR, MADLOOP7_OUTPUT_DIR]:
+            for dir in [MADGRAPH_OUTPUT_DIR, graphs_output_DIR, GAMMALOOP_OUTPUT_DIR, MADLOOP7_OUTPUT_DIR]:
                 process_dir = pjoin(
                     self.config["output_path"], dir, output_name)
                 if os.path.isdir(process_dir):

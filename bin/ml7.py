@@ -24,6 +24,8 @@ generate_command = subparsers.add_parser(
 
 generate_command.add_argument('--process_name', '-pn', type=str, default='gg_gg_madgraph',
                               help='Hard-coded process name to generate')
+generate_command.add_argument('--evaluation_strategy', '-es', type=str, default='tensor_networks',
+                              choices=['only_dot_products', 'tensor_networks'], help='Evaluation strategy.')
 generate_command.add_argument('--tree_graph_ids', '-tids', type=int, nargs="+", default=None,
                               help='list of tree graph ids to consider for the matrix element evaluator')
 generate_command.add_argument('--loop_graph_ids', '-lids', type=int, nargs="+", default=None,

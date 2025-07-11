@@ -38,7 +38,7 @@ MODEL_PARAMS = [
     %(model_parameters)s
 ]
 
-N_HORNER_ITERATIONS = 100
+N_HORNER_ITERATIONS = 5
 N_CORES = 1
 OPRIMIZATION_LEVEL = 3
 COMPILER = None  # '/opt/local/bin/gcc'
@@ -49,8 +49,11 @@ SEED = 1337
 if __name__ == "__main__":
     print("Running standalone script")
 
-    with open("me_expression.txt", "r") as f:
-        me_expression = E(f.read())
+    with open("me_expression_terms.txt", "r") as f:
+        me_expression_terms = [E(t) for t in eval(f.read())]
+    me_expression = E("0")
+    for t in me_expression_terms:
+        me_expression += t
 
     n_external = 4
     params = []

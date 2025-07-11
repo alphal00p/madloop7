@@ -1,5 +1,5 @@
 from . import logger
-from pprint import pformat
+from pprint import pformat, pprint
 from madloop7.process_definitions import HardCodedProcess, HARDCODED_PROCESSES
 from madloop7.utils import MadLoop7Error, get_model, FlatPhaseSpaceGenerator
 from typing import Any
@@ -11,6 +11,7 @@ import sys
 import logging
 import subprocess
 import shutil
+import re
 from enum import Enum
 
 from pprint import pformat, pprint
@@ -281,18 +282,13 @@ class MadLoop7(object):
         elif expressions["tree"]["graph_expressions"] == {}:
             eval_mode = EvalMode.LOOPxLOOP
 
-        # self.import_symbolica_community()
-        # from symbolica_community import Expression, S, E  # type: ignore # nopep8
-        # print((S("TTT", is_linear=True, is_symmetric=True)(
-        #     E("x+y"), E("x+y"))**-1).expand().to_canonical_string())
-        # stop
         match evaluation_strategy:
             case EvaluationStrategy.ONLY_DOT_PRODUCTS:
                 logger.info("Building evaluator with only dot products...")
-                matrix_element_expression = self.build_matrix_element_expression_only_dots(
+                matrix_element_terms = self.build_matrix_element_expression_only_dots(
                     process, expressions,  eval_mode)
                 self.export_evaluator_only_dots(
-                    process, matrix_element_expression, eval_mode)
+                    process, matrix_element_terms, eval_mode)
             case EvaluationStrategy.TENSOR_NETWORKS:
                 logger.info("Building evaluator with tensor networks...")
                 matrix_element_expression = self.build_matrix_element_expression_tensor_networks(
@@ -313,33 +309,22 @@ class MadLoop7(object):
             expr = expr.replace(E_sp("Metric(x_,y_)"),
                                 E_sp("g(x_,y_)"), repeat=True)
             expr = expr.replace(E_sp("id(x_,y_)"),
-                                E_sp("𝟙(x_,y_)"), repeat=True)
+                                E_sp("g(x_,y_)"), repeat=True)
             expr = expr.replace(E("spenso::γ(x_,y_,z_)"), E(
-                "alg::gamma(x_,y_,z_)"), repeat=True)
+                "spenso::gamma(x_,y_,z_)"), repeat=True)
             expr = expr.replace(E("spenso::T(x_,y_,z_)"),
-                                E("alg::t(x_,y_,z_)"), repeat=True)
-            expr = expr.replace(E("spenso::f(x_,y_,z_)"),
-                                E("alg::f(x_,y_,z_)"), repeat=True)
-            expr = expr.replace(E("spenso::TR"), E("alg::TR"), repeat=True)
-            expr = expr.replace(E("spenso::Nc"), E("alg::Nc"), repeat=True)
-            expr = expr.replace(E("spenso::v(x__)"),
-                                E("alg::v(x__)"), repeat=True)
-            expr = expr.replace(E("spenso::vbar(x__)"),
-                                E("alg::vbar(x__)"), repeat=True)
-            expr = expr.replace(E("spenso::u(x__)"),
-                                E("alg::u(x__)"), repeat=True)
-            expr = expr.replace(E("spenso::ubar(x__)"),
-                                E("alg::ubar(x__)"), repeat=True)
-            expr = expr.replace(E("spenso::ϵ(x__)"),
-                                E("alg::ϵ(x__)"), repeat=True)
-            expr = expr.replace(E("spenso::ϵbar(x__)"),
-                                E("alg::ϵbar(x__)"), repeat=True)
+                                E("spenso::t(x_,y_,z_)"), repeat=True)
             expr = expr.replace(E("spenso::mink(4,x_)"), E(
                 "spenso::mink(python::dim,x_)"), repeat=True)
             expr = expr.replace(E("spenso::coad(8,x_)"), E(
-                "spenso::coad(alg::Nc^2-1,x_)"), repeat=True)
+                "spenso::coad(spenso::Nc^2-1,x_)"), repeat=True)
             expr = expr.replace(E("spenso::cof(3,x_)"), E(
-                "spenso::cof(alg::Nc,x_)"), repeat=True)
+                "spenso::cof(spenso::Nc,x_)"), repeat=True)
+            expr = expr.replace(E("spenso::gamma(spenso::mink(x__),y__)"), E(
+                "spenso::gamma(y__,spenso::mink(x__))"))
+            expr = expr.replace(E("spenso::T(spenso::coad(x__),spenso::cof(y__),spenso::dind(cof(z__)))"), E(
+                "spenso::T(spenso::coad(x__),spenso::cof(y__),spenso::dind(cof(z__)))"))
+            expr = expr.replace(E("spenso::𝑖"), E("1𝑖"))
             return expr
 
         numerator = curate(
@@ -347,7 +332,7 @@ class MadLoop7(object):
         denominator = E("1")
         for (p, m) in graph_expr['denominators'].items():
             denominator = denominator * \
-                (S("symbolica_community::dot", is_linear=True,
+                (S("spenso::dot", is_linear=True,
                  is_symmetric=True)(E_sp(p), E_sp(p)) - E_sp(m)**2)
 
         if to_lmb:
@@ -366,12 +351,13 @@ class MadLoop7(object):
         """Combine left and right expressions into a single expression."""
         self.import_symbolica_community()
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
-        from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
+        from symbolica_community.tensors import TensorNetwork, TensorLibrary, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
         from symbolica_community.algebraic_simplification import wrap_dummies, conj, simplify_color, simplify_gamma, to_dots  # type: ignore # nopep8
         expressions = {'left': left, 'right': right}
 
         dim = S("python::dim")
         mink = Representation.mink(dim)
+        bis = Representation.bis(dim)
         P_symbol = S("spenso::P")
         N_symbol = S("spenso::N")
         Q = TensorStructure(mink, name=S("spenso::Q"))
@@ -387,17 +373,24 @@ class MadLoop7(object):
         def n(i, j):
             return N(i, ';', j)
 
-        gamma = TensorStructure.gammadD(dim)
-        g = TensorStructure.metric(mink)
+        hep_lib = TensorLibrary.hep_lib()
+
+        def gamma(i, j, k):
+            tt = f"spenso::gamma(spenso::bis(4,{i.to_canonical_string()}),spenso::bis(4,{j.to_canonical_string()}),spenso::mink(4,{k.to_canonical_string()}))"  # nopep8
+            return E(tt)
+
+        def g(i, j):
+            tt = f"spenso::g(spenso::mink(4,{i.to_canonical_string()}),spenso::mink(4,{j.to_canonical_string()}))"  # nopep8
+            return E(tt)
 
         bis = Representation.bis(4)
         u, ubar, v, vbar, eps, epsbar = S(
-            "alg::u", "alg::ubar", "alg::v", "alg::vbar", "alg::ϵ", "alg::ϵbar")
+            "spenso::u", "spenso::ubar", "spenso::v", "spenso::vbar", "spenso::ϵ", "spenso::ϵbar")
         i_, j_, d_, a_, b_ = S("i_", "j_", "d_", "a_", "b_")
         dummy = S("dummy")
         l_side = S("l")
         r_side = S("r")
-        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+        dot = S("spenso::dot", is_linear=True, is_symmetric=True)
 
         SIMPLIFY_INDIVIDUAL_INTERFERENCE_TERMS_SEPARATELY = True
 
@@ -406,28 +399,58 @@ class MadLoop7(object):
             for key in ['left', 'right']:
                 side_expression = E("0")
                 for _graph_id, graph_expr in sorted(expressions[key].items(), key=lambda x: x[0]):
-                    side_expression = side_expression + \
-                        self.build_graph_expression(graph_expr, to_lmb=True)
+                    num, denom = self.build_graph_expression(
+                        graph_expr, to_lmb=True, split_num_denom=True)
+                    side_expression = side_expression + num / denom
                 expressions[key] = side_expression
 
             left_e = wrap_dummies(expressions['left'], l_side)
             right_e = conj(wrap_dummies(expressions['right'], r_side))
-            terms.append((left_e*right_e).expand())
+            terms.append(
+                (
+                    (left_e*right_e).expand(),
+                    E("1")
+                )
+            )
         else:
-            diagram_expressions = {}
-            diagram_expressions['left'] = [
-                (graph_id, wrap_dummies(self.build_graph_expression(
-                    graph_expr, to_lmb=True), l_side))
-                for graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0])
-            ]
-            diagram_expressions['right'] = [
-                (graph_id, conj(wrap_dummies(self.build_graph_expression(
-                    graph_expr, to_lmb=True), r_side)))
-                for graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0])
-            ]
-            for left_id, left_expr in diagram_expressions['left']:
-                for right_id, right_expr in diagram_expressions['right']:
-                    terms.append((left_expr*right_expr).expand())
+            diagram_expressions = {'left': [], 'right': []}
+            for graph_id, graph_expr in sorted(expressions['left'].items(), key=lambda x: x[0]):
+                num, denom = self.build_graph_expression(
+                    graph_expr, to_lmb=True, split_num_denom=True)
+                diagram_expressions['left'].append(
+                    (
+                        graph_id,
+                        wrap_dummies(num, l_side),
+                        denom
+                    )
+                )
+
+            # print(sorted(expressions['left'].items(), key=lambda x: x[0]))
+
+            for graph_id, graph_expr in sorted(expressions['right'].items(), key=lambda x: x[0]):
+                num, denom = self.build_graph_expression(
+                    graph_expr, to_lmb=True, split_num_denom=True)
+                diagram_expressions['right'].append(
+                    (
+                        graph_id,
+                        conj(wrap_dummies(num, r_side)),
+                        denom
+                    )
+                )
+            # print(sorted(expressions['right'].items(), key=lambda x: x[0])[0])
+
+            # print(diagram_expressions['right'])
+            for (left_id, left_expr_num, left_expr_denom) in diagram_expressions['left']:
+                for (right_id, right_expr_num, right_expr_denom) in diagram_expressions['right']:
+                    # VHHACK
+                    # if left_id == right_id:
+                    #     continue
+                    terms.append(
+                        (
+                            (left_expr_num*right_expr_num).expand(),
+                            left_expr_denom * right_expr_denom
+                        )
+                    )
 
         # For now only support massless externals
         if PHYSICAL_VECTOR_SUM_RULE:
@@ -438,68 +461,52 @@ class MadLoop7(object):
         else:
             transverse_physical_vector_sum = E("0")
 
-        spin_sum_rules = [
-            (
-                eps(i_, mink(l_side(a_)))*epsbar(i_, mink(r_side(a_))),
-                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
-            ),
-            (
-                eps(i_, mink(r_side(a_)))*epsbar(i_, mink(l_side(a_))),
-                -g(l_side(a_), r_side(a_)) + transverse_physical_vector_sum
-            ),
-            (
-                vbar(i_, bis(l_side(a_)))*v(i_, bis(r_side(a_))),
-                gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
-                p(i_, dummy(i_, a_))
-            ),
-            (
-                vbar(i_, bis(r_side(a_)))*v(i_, bis(l_side(a_))),
-                gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
-                p(i_, dummy(i_, a_))
-            ),
-            (
-                ubar(i_, bis(l_side(a_)))*u(j_, bis(r_side(a_))),
-                -gamma(dummy(i_, a_), l_side(a_), r_side(a_)) *
-                p(i_, dummy(i_, a_))
-            ),
-            (
-                ubar(i_, bis(r_side(a_)))*u(j_, bis(l_side(a_))),
-                -gamma(dummy(i_, a_), r_side(a_), l_side(a_)) *
-                p(i_, dummy(i_, a_))
-            ),
-        ]
+        spin_sum_rules = []
+        for sides in [(l_side, r_side), (r_side, l_side)]:
+            spin_sum_rules.extend([
+                (
+                    eps(i_, mink(sides[0](a_)))*epsbar(i_, mink(sides[1](a_))),
+                    -g(sides[0](a_), sides[1](a_)) + transverse_physical_vector_sum  # nopep8
+                ),
+                (
+                    vbar(i_, bis(sides[0](a_)))*v(i_, bis(sides[1](a_))),
+                    gamma(sides[0](a_), sides[1](a_), dummy(i_, a_)) * p(i_, dummy(i_, a_)),  # nopep8
+                ),
+                (
+                    ubar(i_, bis(sides[0](a_)))*u(j_, bis(sides[1](a_))),
+                    -gamma(sides[0](a_), sides[1](a_), dummy(i_, a_)) * p(i_, dummy(i_, a_))  # nopep8
+                ),
+            ])
 
         def substitute_constants(input_e: Expression) -> Expression:
             constants = [
                 (dim, E("4")),
-                (E("alg::TR"), E("1/2")),
-                (E("alg::Nc"), E("3")),
-                (E("alg::CF"), E("4/3")),
-                (E("alg::CA"), E("3")),
+                (E("spenso::TR"), E("1/2")),
+                (E("spenso::Nc"), E("3")),
+                (E("spenso::CF"), E("4/3")),
+                (E("spenso::CA"), E("3")),
             ]
             for src, trgt in constants:
                 input_e = input_e.replace(src, trgt)
             return input_e
 
-        final_result = E("0")
+        final_result = []
         logger.info(
             "Starting the processing of %d interference terms..." % len(terms))
-        for i_t, t in enumerate(terms):
+        for i_t, (t, t_denom) in enumerate(terms):
             print("Processing terms %-6d / %d " %
                   (i_t, len(terms)), end="\r")
             for src, trgt in spin_sum_rules:
                 t = t.replace(src, trgt, repeat=True)
-            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_color_simplify.txt', 'w') as f:
-            #     f.write(t.to_canonical_string())
-            # print("Simplifying_color...")
+            t = t.replace(dim, E("4"), repeat=True)
             t = simplify_color(t)
-            # with open('/Users/vjhirsch/Documents/Work/madloop7/test_expression_before_gamma_simplify.txt', 'w') as f:
-            #     f.write(t.to_canonical_string())
-            # print("Simplifying_gamma...")
             t = simplify_gamma(t)
             t = to_dots(t)
+            t_denom = to_dots(t_denom)
+            t = t / t_denom
             t = substitute_constants(t)
-            final_result = final_result + t
+
+            final_result.append(t)
 
         return final_result
 
@@ -510,10 +517,11 @@ class MadLoop7(object):
 
         match mode:
             case EvalMode.TREExTREE:
-                me_expr = self.sum_square_left_right_only_dots(
+                me_expr_terms = self.sum_square_left_right_only_dots(
                     expressions["tree"]["graph_expressions"], expressions["tree"]["graph_expressions"])
-                me_expr = me_expr * E(process.overall_factor)
-                return me_expr
+                me_expr_terms = [t * E(process.overall_factor)
+                                 for t in me_expr_terms]
+                return me_expr_terms
 
             case EvalMode.LOOPxTREE:
                 raise MadLoop7Error(
@@ -522,7 +530,7 @@ class MadLoop7(object):
                 raise MadLoop7Error(
                     "Loop x loop matrix element expression building not implemented yet!")
 
-    def export_evaluator_only_dots(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
+    def export_evaluator_only_dots(self, process: HardCodedProcess, matrix_element_terms: list[Any], mode: EvalMode) -> None:
         self.import_symbolica_community()
         from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
@@ -535,7 +543,7 @@ class MadLoop7(object):
         mink = Representation.mink(dim)
         P = S("spenso::P")
         N = S("spenso::N")
-        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+        dot = S("spenso::dot", is_linear=True, is_symmetric=True)
         match mode:
             case EvalMode.TREExTREE:
 
@@ -556,27 +564,29 @@ class MadLoop7(object):
 
                 for i in range(process.n_external):
                     for j in range(process.n_external):
-                        matrix_element_expression = matrix_element_expression.replace(
-                            dot(N(i), P(j)), E(f"dot_n{i+1}_{j+1}"))
+                        matrix_element_terms = [t.replace(
+                            dot(N(i), P(j)), E(f"dot_n{i+1}_{j+1}"), repeat=True) for t in matrix_element_terms]
                         if i <= j:
                             if i == j:
                                 # Only support massless
                                 dot_param = E("0")
                             else:
                                 dot_param = E(f"dot_{i+1}_{j+1}")
-                            matrix_element_expression = matrix_element_expression.replace(
-                                dot(P(i), P(j)), dot_param)
-                            matrix_element_expression = matrix_element_expression.replace(
-                                dot(N(i), N(j)), E(f"dot_n{i+1}_n{j+1}"))
+                            matrix_element_terms = [t.replace(
+                                dot(P(i), P(j)), dot_param, repeat=True) for t in matrix_element_terms]
+                            matrix_element_terms = [t.replace(
+                                dot(N(i), N(j)), E(f"dot_n{i+1}_n{j+1}"), repeat=True) for t in matrix_element_terms]
 
-                model_param_symbols = [s for s in matrix_element_expression.get_all_symbols(
-                    False) if not str(s).startswith("dot")]
+                model_param_symbols = sum([[s for s in t.get_all_symbols(
+                    False) if not str(s).startswith("dot")] for t in matrix_element_terms], [])
                 model = get_model(process.model)
                 model_parameters = model.get('parameter_dict')
-                matrix_element_expression = matrix_element_expression.expand().collect_factors()
+                matrix_element_terms = [t.expand().collect_factors()
+                                        for t in matrix_element_terms]
 
-                with open(pjoin(madloop7_output, "me_expression.txt"), "w") as f:
-                    f.write(matrix_element_expression.to_canonical_string())
+                with open(pjoin(madloop7_output, "me_expression_terms.txt"), "w") as f:
+                    f.write('[\n'+'\n,'.join(['"(%s)"' % t.to_canonical_string()
+                            for t in matrix_element_terms])+'\n]')
                 shutil.copyfile(
                     pjoin(root_path, "templates", "phase_space_generator.py"),
                     pjoin(madloop7_output, "phase_space_generator.py"),
@@ -635,7 +645,7 @@ class MadLoop7(object):
         x_, x___ = S("x_", "x___")
         polarization_vec = S("polarization_vec")
         u, ubar, v, vbar, eps, epsbar = S(
-            "alg::u", "alg::ubar", "alg::v", "alg::vbar", "alg::ϵ", "alg::ϵbar")
+            "spenso::u", "spenso::ubar", "spenso::v", "spenso::vbar", "spenso::ϵ", "spenso::ϵbar")
 
         tmp = expression.replace_multiple([
             Replacement(u(x___), polarization_vec(u(x___))),
@@ -654,12 +664,14 @@ class MadLoop7(object):
     def sum_square_left_right_tensor_networks(self, process: HardCodedProcess, left: dict[Any, Any], right: dict[Any, Any]) -> Any:
         """Combine left and right expressions into a single expression."""
         self.import_symbolica_community()
-        from symbolica_community import Expression, S, E  # type: ignore # nopep8
-        from symbolica_community.tensors import sparse_empty, dense, TensorLibrary, TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
+        from symbolica_community import Expression, Replacement, S, E  # type: ignore # nopep8
+
+        from symbolica_community.tensors import LibraryTensor, TensorLibrary, TensorNetwork, Representation, TensorStructure, TensorIndices, Tensor, Slot  # type: ignore # nopep8
         from symbolica_community.algebraic_simplification import cook_indices, wrap_dummies, conj, simplify_color, simplify_gamma, to_dots  # type: ignore # nopep8
 
         dim = S("python::dim")
         mink = Representation.mink(dim)
+        bis = Representation.bis(dim)
         mink4 = Representation.mink(4)
         Q_symbol = S("spenso::Q")
         P_symbol = S("spenso::P")
@@ -689,84 +701,41 @@ class MadLoop7(object):
         def n4(i, j):
             return N4(i, ';', j)
 
-        my_lib = TensorLibrary.weyl()
-
-        g_struct = TensorStructure.metric(mink4)
-
-        metric_tensor = sparse_empty(g_struct, type(1.0))
-        metric_tensor[[0, 0]] = 1
-        metric_tensor[[1, 1]] = -1
-        metric_tensor[[2, 2]] = -1
-        metric_tensor[[3, 3]] = -1
-
-        my_lib.register(metric_tensor)
-        id_struct = TensorStructure.id(mink4)
-
-        # my_tensor = TensorNetwork(P4(2)*TensorStructure.id(mink4)(2, 3))
-        # my_tensor = TensorNetwork(p4(69, 2)*TensorStructure.id(mink4)(2, 3))
-        # my_tensor.execute(my_lib)
-        # print(my_tensor.result_tensor(my_lib))
-        # print(my_tensor.result_tensor(my_lib)[1])
-
-        # # my_tensor = TensorNetwork(P4(2)*TensorStructure.id(mink4)(2, 3))
-        # # my_tensor = TensorNetwork.one()*P4(2)
-
-        # my_tensor = TensorNetwork.from_expression(
-        #     P4(2)*id_struct(2, 3), my_lib)
-        # my_tensor = TensorNetwork.from_expression(P4(2)*g_struct(2, 3), my_lib)
-
-        # my_tensor = TensorNetwork.from_expression(
-        #     cook_indices(E("spenso::g(spenso::mink(4,l(2)),spenso::mink(4,r(2)))*P(2,spenso::mink(4,l(2)))")), my_lib)
-        # my_tensor = TensorNetwork.from_expression(
-        #     cook_indices(E("spenso::g(spenso::mink(4,l(11)),spenso::mink(4,r(22)))*spenso::𝟙(spenso::mink(4,l(2)),spenso::mink(4,r(2)))*P(2,spenso::mink(4,l(2)))")), my_lib)
-        # # my_tensor = TensorNetwork.from_expression(
-        # #     cook_indices(E("P(2,spenso::mink(4,l(2)))")), my_lib)
-
-        # my_tensor.execute(my_lib)
-        # print(my_tensor.result_tensor(my_lib))
-        # print(my_tensor.result_tensor(my_lib).structure())
+        my_lib = TensorLibrary.hep_lib()
 
         l_side = S("l")
         r_side = S("r")
-        # pol_sums = []
-        # for i in range(process.n_external):
-        #     pol_sum_i = TensorNetwork.from_expression(
-        #         cook_indices(
-        #             - E(f"spenso::g(spenso::mink(4,l({i})),spenso::mink(4,r({i})))")
-        #             + E(f"( P({i},spenso::mink(4,l({i}))) * N(spenso::mink(4,r({i}))) + N(spenso::mink(4,l({i}))) * P({i},spenso::mink(4,r({i}))) )/ P({i},spenso::cind(0))")  # nopep8
-        #             - E(f"( P({i},spenso::mink(4,l({i}))) * P({i},spenso::mink(4,r({i}))) ) / ( P({i},spenso::cind(0))^2 )")  # nopep8
-        #         ),
-        #         my_lib)
-        #     pol_sum_i.execute(my_lib)
-        #     pol_sum_i = pol_sum_i.result_tensor(my_lib)
-        #     pol_sums.append(pol_sum_i)
 
-        gamma = TensorStructure.gammadD(dim)
+        gamma = TensorStructure(mink, bis, bis, name=S('spenso::gamma'))
 
-        g = TensorStructure.metric(mink)
+        g = TensorStructure(mink, mink, name=S('spenso::g'))
 
         bis = Representation.bis(4)
         u, ubar, v, vbar, eps, epsbar = S(
-            "alg::u", "alg::ubar", "alg::v", "alg::vbar", "alg::ϵ", "alg::ϵbar")
+            "spenso::u", "spenso::ubar", "spenso::v", "spenso::vbar", "spenso::ϵ", "spenso::ϵbar")
         i_, j_, d_, a_, b_ = S("i_", "j_", "d_", "a_", "b_")
         dummy = S("dummy")
         dummy_ss = S("dummy_ss")
 
-        dot = S("symbolica_community::dot", is_linear=True, is_symmetric=True)
+        dot = S("spenso::dot", is_linear=True, is_symmetric=True)
 
         expressions = {'left': left, 'right': right}
         lorentz_tensors = {}
         polarization_vecs = {'left': None, 'right': None}
+        polarization_vec_pieces = {
+            i_ext: {'left': None, 'right': None} for i_ext in range(process.n_external)}
         for i_side, (key, wrapper) in enumerate(zip(['left', 'right'], [l_side, r_side])):
             side_expression = E("0")
             for graph_id, graph_expr in sorted(expressions[key].items(), key=lambda x: x[0]):
                 num, denom = self.build_graph_expression(
                     graph_expr, to_lmb=True, split_num_denom=True)
+
                 if key == 'right':
                     num = conj(num)
                     denom = conj(denom)
                 num = wrap_dummies(num, wrapper)
                 num_pol_vectors_splits = self.expand_pol_vectors(num)
+
                 if len(num_pol_vectors_splits) != 1:
                     raise MadLoop7Error(
                         "Only one polarization vector structure is expected to be found per process")
@@ -778,6 +747,24 @@ class MadLoop7(object):
                     if pol_vectors != polarization_vecs[key]:
                         raise MadLoop7Error(
                             "Polarization vector structures do not match between graphs")
+
+                pattern = E("f_")(E("x___"), E("rep_")
+                                  (E("y___"), wrapper(E("x_"))))
+                for m in pol_vectors.match(pattern):
+                    # a_match = pattern.replace_multiple(
+                    #     [Replacement(k, v, k.req_lit()) for k, v in m.items()], repeat=True)
+                    a_match = pattern.to_canonical_string()
+                    for k, e in m.items():
+                        a_match = re.sub(k.to_canonical_string(),
+                                         e.to_canonical_string(), a_match)
+                    a_match = E(a_match)
+                    ext_id = int(m[S('x_')].to_canonical_string())
+                    if polarization_vec_pieces[ext_id][key] is None:
+                        polarization_vec_pieces[ext_id][key] = a_match
+                    else:
+                        if polarization_vec_pieces[ext_id][key] != a_match:
+                            raise MadLoop7Error(
+                                f"Polarization vector pieces for {key} external #{ext_id} do not match between graphs")
                 color_lorentz_splits = self.expand_color(num)
                 for lor_struct_id, (col, lor) in enumerate(color_lorentz_splits):
                     lorentz_tensors[(i_side, graph_id, lor_struct_id)] = lor
@@ -801,8 +788,22 @@ class MadLoop7(object):
         assert (polarization_vecs['left'] is not None)
         assert (polarization_vecs['right'] is not None)
 
+        for k, e in polarization_vec_pieces.items():
+            if e['left'] is None:
+                e['left'] = E("1")
+            if e['right'] is None:
+                e['right'] = E("1")
+            assert (e['left'] is not None)
+            assert (e['right'] is not None)
+
+        # print("polarization_vecs['left']=", polarization_vecs['left'])
+        # print("polarization_vecs['right']=", polarization_vecs['right'])
+        # pprint(polarization_vec_pieces)
+
         pol_spin_sum_input = (
             polarization_vecs['left'] * polarization_vecs['right'])
+        pol_spin_sum_input_pieces = {k: e['left']*e['right']
+                                     for k, e in polarization_vec_pieces.items()}
         # For now only support massless externals
         if PHYSICAL_VECTOR_SUM_RULE:
             transverse_physical_vector_sum_num = n(i_, dummy_ss(i_, 1)) * p(i_, dummy_ss(i_, 1)) * (
@@ -860,20 +861,35 @@ class MadLoop7(object):
             pol_spin_sum_denom = pol_spin_sum_denom.replace(
                 src, trgt_denom, repeat=True)
 
+        pol_spin_sum_input_pieces_num = {}
+        pol_spin_sum_input_pieces_denom = {}
+        for k, e in pol_spin_sum_input_pieces.items():
+            pol_spin_sum_input_pieces_num[k] = e
+            pol_spin_sum_input_pieces_denom[k] = e
+            for src, (trgt_num, trgt_denom) in spin_sum_rules:
+                pol_spin_sum_input_pieces_num[k] = pol_spin_sum_input_pieces_num[k].replace(
+                    src, trgt_num, repeat=True)
+                pol_spin_sum_input_pieces_denom[k] = pol_spin_sum_input_pieces_denom[k].replace(
+                    src, trgt_denom, repeat=True)
+
         # Define choice of gauge vectors
         # "temporal": n = (1,0,0,0)
         # "k-axial": n = (k^0, -k_vec)
         # GAUGE_VECTOR_CHOICE = "madgraph"
         GAUGE_VECTOR_CHOICE = "k-axial"
 
+        id_tensor = S('spenso::𝟙')
+        hep_lib = TensorLibrary.hep_lib()
         for i in range(process.n_external):
-            n_temporal_vector = sparse_empty(
+            n_temporal_vector = LibraryTensor.sparse(
                 TensorStructure(mink4, E(f"{i}"), name=N_symbol), type(E("1")))
             match GAUGE_VECTOR_CHOICE:
                 case "temporal":
                     n_temporal_vector[[0,]] = E("1")
                 case "k-axial":
-                    t = TensorNetwork(p4(i, 1)*TensorStructure.id(mink4)(1, 2))
+                    # t = TensorNetwork(p4(i, 1)*TensorStructure.id(mink4)(1, 2))
+                    t = TensorNetwork(
+                        p4(i, 1)*TensorStructure(mink4, mink4, name=id_tensor)(1, 2))
                     t.execute(my_lib)
                     t = t.result_tensor(my_lib)
                     for t_idx in t.structure():
@@ -881,6 +897,26 @@ class MadLoop7(object):
                     # for j in range(4):
                     #     n_temporal_vector[[j,]] = t[[j,]]
             my_lib.register(n_temporal_vector)
+
+        # Process the tensor networks
+        for k in pol_spin_sum_input_pieces_num:
+            e = cook_indices(
+                pol_spin_sum_input_pieces_num[k]).replace(dim, E("4"))
+            t = TensorNetwork(e, my_lib)
+            t.execute(my_lib)
+            # print(t)
+            t = t.result_tensor(my_lib)
+            # print(t)
+            t2 = t
+            for i in t.structure():
+                try:
+                    t2[i] = t[i].replace(E(f"P({k},cind(0))^2", "spenso"), E(
+                        f"(P({k},cind(1))^2+P({k},cind(2))^2+P({k},cind(3))^2)", "spenso")).expand()
+                except IndexError as e:
+                    t2[i] = E("0")
+            pol_spin_sum_input_pieces_num[k] = TensorNetwork.one()*t2
+
+        # pprint(pol_spin_sum_input_pieces_num)
 
         # Add dot products replacement
         dot_products_replacement = []
@@ -892,24 +928,24 @@ class MadLoop7(object):
                         E("0")
                     ))
                 elif i < j:
-                    t = TensorNetwork.from_expression(
+                    t = TensorNetwork(
                         p4(i, 1)*p4(j, 1), my_lib)
                     t.execute(my_lib)
                     t = t.result_tensor(my_lib)
                     dot_products_replacement.append((dot(P_symbol(i), P_symbol(j)), t[[]]))  # nopep8
 
-                t = TensorNetwork.from_expression(n4(i, 1)*n4(j, 1), my_lib)
+                t = TensorNetwork(n4(i, 1)*n4(j, 1), my_lib)
                 t.execute(my_lib)
                 t = t.result_tensor(my_lib)
                 dot_products_replacement.append((dot(N_symbol(i), N_symbol(j)), t[[]]))  # nopep8
 
-                t = TensorNetwork.from_expression(n4(i, 1)*p4(j, 1), my_lib)
+                t = TensorNetwork(n4(i, 1)*p4(j, 1), my_lib)
                 t.execute(my_lib)
                 t = t.result_tensor(my_lib)
 
                 dot_products_replacement.append((dot(N_symbol(i), P_symbol(j)), t[[]]))  # nopep8
 
-                t = TensorNetwork.from_expression(p4(i, 1)*n4(j, 1), my_lib)
+                t = TensorNetwork(p4(i, 1)*n4(j, 1), my_lib)
                 t.execute(my_lib)
                 t = t.result_tensor(my_lib)
                 dot_products_replacement.append((dot(P_symbol(i), N_symbol(j)), t[[]]))  # nopep8
@@ -918,10 +954,10 @@ class MadLoop7(object):
         def substitute_constants(input_e: Expression) -> Expression:
             constants = [
                 (dim, E("4")),
-                (E("alg::TR"), E("1/2")),
-                (E("alg::Nc"), E("3")),
-                (E("alg::CF"), E("4/3")),
-                (E("alg::CA"), E("3")),
+                (E("spenso::TR"), E("1/2")),
+                (E("spenso::Nc"), E("3")),
+                (E("spenso::CF"), E("4/3")),
+                (E("spenso::CA"), E("3")),
             ]
             for src, trgt in constants:
                 input_e = input_e.replace(src, trgt)
@@ -937,14 +973,14 @@ class MadLoop7(object):
         me = simplify_color(me)
         me = substitute_constants(me)
 
-        # tmp = E("""((spenso::N(4,spenso::mink(4,python::l(2)))*spenso::P(4,spenso::mink(4,python::r(2)))+spenso::N(4,spenso::mink(4,python::r(2)))*spenso::P(4,spenso::mink(4,python::l(2))))*spenso::N(4,spenso::mink(4,python::dummy_ss(4,1)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,1)))+-1*spenso::N(4,spenso::mink(4,python::dummy_ss(4,2)))^2*spenso::P(4,spenso::mink(4,python::l(2)))*spenso::P(4,spenso::mink(4,python::r(2)))+-1*spenso::N(4,spenso::mink(4,python::dummy_ss(4,3)))*spenso::N(4,spenso::mink(4,python::dummy_ss(4,4)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,3)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,4)))*spenso::g(spenso::mink(4,python::l(2)),spenso::mink(4,python::r(2))))*((spenso::N(5,spenso::mink(4,python::l(3)))*spenso::P(5,spenso::mink(4,python::r(3)))+spenso::N(5,spenso::mink(4,python::r(3)))*spenso::P(5,spenso::mink(4,python::l(3))))*spenso::N(5,spenso::mink(4,python::dummy_ss(5,1)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,1)))+-1*spenso::N(5,spenso::mink(4,python::dummy_ss(5,2)))^2*spenso::P(5,spenso::mink(4,python::l(3)))*spenso::P(5,spenso::mink(4,python::r(3)))+-1*spenso::N(5,spenso::mink(4,python::dummy_ss(5,3)))*spenso::N(5,spenso::mink(4,python::dummy_ss(5,4)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,3)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,4)))*spenso::g(spenso::mink(4,python::l(3)),spenso::mink(4,python::r(3))))*(-1*spenso::G^2*spenso::P(0,spenso::mink(4,python::r(20)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::r(0)),spenso::bis(4,python::r(7)))*spenso::𝟙(spenso::bis(4,python::r(1)),spenso::bis(4,python::r(4)))*spenso::𝟙(spenso::mink(4,python::r(2)),spenso::mink(4,python::r(5)))*spenso::𝟙(spenso::mink(4,python::r(3)),spenso::mink(4,python::r(4)))*weyl::gamma(spenso::mink(4,python::r(20)),spenso::bis(4,python::r(5)),spenso::bis(4,python::r(6)))*weyl::gamma(spenso::mink(4,python::r(4)),spenso::bis(4,python::r(4)),spenso::bis(4,python::r(5)))*weyl::gamma(spenso::mink(4,python::r(5)),spenso::bis(4,python::r(6)),spenso::bis(4,python::r(7)))+spenso::G^2*spenso::P(2,spenso::mink(4,python::r(20)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::r(0)),spenso::bis(4,python::r(7)))*spenso::𝟙(spenso::bis(4,python::r(1)),spenso::bis(4,python::r(4)))*spenso::𝟙(spenso::mink(4,python::r(2)),spenso::mink(4,python::r(5)))*spenso::𝟙(spenso::mink(4,python::r(3)),spenso::mink(4,python::r(4)))*weyl::gamma(spenso::mink(4,python::r(20)),spenso::bis(4,python::r(5)),spenso::bis(4,python::r(6)))*weyl::gamma(spenso::mink(4,python::r(4)),spenso::bis(4,python::r(4)),spenso::bis(4,python::r(5)))*weyl::gamma(spenso::mink(4,python::r(5)),spenso::bis(4,python::r(6)),spenso::bis(4,python::r(7))))*(-1*spenso::P(2,spenso::mink(4,python::l(20)))+spenso::P(0,spenso::mink(4,python::l(20))))*-1*spenso::G^2*spenso::P(2,spenso::mink(4,python::dummy(2,0)))*spenso::P(3,spenso::mink(4,python::dummy(3,1)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::l(0)),spenso::bis(4,python::l(7)))*spenso::𝟙(spenso::bis(4,python::l(1)),spenso::bis(4,python::l(4)))*spenso::𝟙(spenso::mink(4,python::l(2)),spenso::mink(4,python::l(5)))*spenso::𝟙(spenso::mink(4,python::l(3)),spenso::mink(4,python::l(4)))*weyl::gamma(spenso::bis(4,python::l(1)),spenso::bis(4,python::r(1)),spenso::mink(4,python::dummy(3,1)))*weyl::gamma(spenso::bis(4,python::r(0)),spenso::bis(4,python::l(0)),spenso::mink(4,python::dummy(2,0)))*weyl::gamma(spenso::mink(4,python::l(20)),spenso::bis(4,python::l(6)),spenso::bis(4,python::l(5)))*weyl::gamma(spenso::mink(4,python::l(4)),spenso::bis(4,python::l(5)),spenso::bis(4,python::l(4)))*weyl::gamma(spenso::mink(4,python::l(5)),spenso::bis(4,python::l(7)),spenso::bis(4,python::l(6)))""")
+        # tmp = E("""((spenso::N(4,spenso::mink(4,python::l(2)))*spenso::P(4,spenso::mink(4,python::r(2)))+spenso::N(4,spenso::mink(4,python::r(2)))*spenso::P(4,spenso::mink(4,python::l(2))))*spenso::N(4,spenso::mink(4,python::dummy_ss(4,1)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,1)))+-1*spenso::N(4,spenso::mink(4,python::dummy_ss(4,2)))^2*spenso::P(4,spenso::mink(4,python::l(2)))*spenso::P(4,spenso::mink(4,python::r(2)))+-1*spenso::N(4,spenso::mink(4,python::dummy_ss(4,3)))*spenso::N(4,spenso::mink(4,python::dummy_ss(4,4)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,3)))*spenso::P(4,spenso::mink(4,python::dummy_ss(4,4)))*spenso::g(spenso::mink(4,python::l(2)),spenso::mink(4,python::r(2))))*((spenso::N(5,spenso::mink(4,python::l(3)))*spenso::P(5,spenso::mink(4,python::r(3)))+spenso::N(5,spenso::mink(4,python::r(3)))*spenso::P(5,spenso::mink(4,python::l(3))))*spenso::N(5,spenso::mink(4,python::dummy_ss(5,1)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,1)))+-1*spenso::N(5,spenso::mink(4,python::dummy_ss(5,2)))^2*spenso::P(5,spenso::mink(4,python::l(3)))*spenso::P(5,spenso::mink(4,python::r(3)))+-1*spenso::N(5,spenso::mink(4,python::dummy_ss(5,3)))*spenso::N(5,spenso::mink(4,python::dummy_ss(5,4)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,3)))*spenso::P(5,spenso::mink(4,python::dummy_ss(5,4)))*spenso::g(spenso::mink(4,python::l(3)),spenso::mink(4,python::r(3))))*(-1*spenso::G^2*spenso::P(0,spenso::mink(4,python::r(20)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::r(0)),spenso::bis(4,python::r(7)))*spenso::𝟙(spenso::bis(4,python::r(1)),spenso::bis(4,python::r(4)))*spenso::𝟙(spenso::mink(4,python::r(2)),spenso::mink(4,python::r(5)))*spenso::𝟙(spenso::mink(4,python::r(3)),spenso::mink(4,python::r(4)))*spenso::gamma(spenso::mink(4,python::r(20)),spenso::bis(4,python::r(5)),spenso::bis(4,python::r(6)))*spenso::gamma(spenso::mink(4,python::r(4)),spenso::bis(4,python::r(4)),spenso::bis(4,python::r(5)))*spenso::gamma(spenso::mink(4,python::r(5)),spenso::bis(4,python::r(6)),spenso::bis(4,python::r(7)))+spenso::G^2*spenso::P(2,spenso::mink(4,python::r(20)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::r(0)),spenso::bis(4,python::r(7)))*spenso::𝟙(spenso::bis(4,python::r(1)),spenso::bis(4,python::r(4)))*spenso::𝟙(spenso::mink(4,python::r(2)),spenso::mink(4,python::r(5)))*spenso::𝟙(spenso::mink(4,python::r(3)),spenso::mink(4,python::r(4)))*spenso::gamma(spenso::mink(4,python::r(20)),spenso::bis(4,python::r(5)),spenso::bis(4,python::r(6)))*spenso::gamma(spenso::mink(4,python::r(4)),spenso::bis(4,python::r(4)),spenso::bis(4,python::r(5)))*spenso::gamma(spenso::mink(4,python::r(5)),spenso::bis(4,python::r(6)),spenso::bis(4,python::r(7))))*(-1*spenso::P(2,spenso::mink(4,python::l(20)))+spenso::P(0,spenso::mink(4,python::l(20))))*-1*spenso::G^2*spenso::P(2,spenso::mink(4,python::dummy(2,0)))*spenso::P(3,spenso::mink(4,python::dummy(3,1)))*spenso::𝑖*spenso::𝟙(spenso::bis(4,python::l(0)),spenso::bis(4,python::l(7)))*spenso::𝟙(spenso::bis(4,python::l(1)),spenso::bis(4,python::l(4)))*spenso::𝟙(spenso::mink(4,python::l(2)),spenso::mink(4,python::l(5)))*spenso::𝟙(spenso::mink(4,python::l(3)),spenso::mink(4,python::l(4)))*spenso::gamma(spenso::bis(4,python::l(1)),spenso::bis(4,python::r(1)),spenso::mink(4,python::dummy(3,1)))*spenso::gamma(spenso::bis(4,python::r(0)),spenso::bis(4,python::l(0)),spenso::mink(4,python::dummy(2,0)))*spenso::gamma(spenso::mink(4,python::l(20)),spenso::bis(4,python::l(6)),spenso::bis(4,python::l(5)))*spenso::gamma(spenso::mink(4,python::l(4)),spenso::bis(4,python::l(5)),spenso::bis(4,python::l(4)))*spenso::gamma(spenso::mink(4,python::l(5)),spenso::bis(4,python::l(7)),spenso::bis(4,python::l(6)))""")
         # # tmp = "spenso::N(4,spenso::mink(4,python::l(2)))"
-        # tmp = tmp.replace(E("weyl::gamma(spenso::mink(x__),y__)"), E(
-        #     "weyl::gamma(y__,spenso::mink(x__))"))
+        # tmp = tmp.replace(E("spenso::gamma(spenso::mink(x__),y__)"), E(
+        #     "spenso::gamma(y__,spenso::mink(x__))"))
         # tmp = cook_indices(tmp)
         # print(tmp.to_canonical_string())
         # my_lib = TensorLibrary.weyl()
-        # # t = TensorNetwork.from_expression(tmp, my_lib)
+        # # t = TensorNetwork(tmp, my_lib)
         # t = TensorNetwork(tmp)
         # print("BEF", t)
         # t.execute(my_lib)
@@ -955,29 +991,36 @@ class MadLoop7(object):
 
         def process_lorentz(match):
             left_key = (0, int(str(match[S("LeftGraphID_")])), int(str(match[S("LeftTermID_")])))  # nopep8
-            right_key = (1, int(str(match[S("LeftGraphID_")])), int(str(match[S("LeftTermID_")])))  # nopep8
+            right_key = (1, int(str(match[S("RightGraphID_")])), int(str(match[S("RightTermID_")])))  # nopep8
+            # VHHACK
+            # if left_key[1] == right_key[1]:
+            #     return E("0")
             print(f"Doing T{left_key}*T{right_key}")
             left_tensor = lorentz_tensors[left_key]
             right_tensor = lorentz_tensors[right_key]
-            tensor_expr = left_tensor * right_tensor * pol_spin_sum_num
-            tensor_expr = tensor_expr.replace(
-                E("spenso::mink(python::dim,x__)"), E("spenso::mink(4,x__)"))
-            tensor_expr = tensor_expr.replace(
-                E("alg::gamma(x___)"), E("weyl::gamma(x___)"))
-            tensor_expr = tensor_expr.replace(E("weyl::gamma(spenso::mink(x__),y__)"), E(
-                "weyl::gamma(y__,spenso::mink(x__))"))
+            tensor_expr = left_tensor * right_tensor
+
+            # tensor_expr = tensor_expr.replace(E("spenso::gamma(spenso::mink(x__),y__)"), E(
+            #     "spenso::gamma(y__,spenso::mink(x__))"))
 
             # HACK
-            HACK_MODE_I = int(str(match[S("LeftGraphID_")])) + \
-                int(str(match[S("LeftTermID_")]))
-            tensor_expr = p4((HACK_MODE_I) % 3, 1)*p4((HACK_MODE_I+1) % 3, 1)
+            # HACK_MODE_I = int(str(match[S("LeftGraphID_")])) + \
+            #     int(str(match[S("LeftTermID_")]))
+            # tensor_expr = p4((HACK_MODE_I) % 3, 1)*p4((HACK_MODE_I+1) % 3, 1)
 
-            tensor_expr = cook_indices(tensor_expr)
+            tensor_expr = cook_indices(tensor_expr).replace(dim, E("4"))
+            t = TensorNetwork(tensor_expr, my_lib)
+
+            # tensor_expr = tensor_expr * pol_spin_sum_num
+            for v in pol_spin_sum_input_pieces_num.values():
+                t = t * v
+
             # print("Processing:\n", tensor_expr.to_canonical_string())
-            t = TensorNetwork.from_expression(tensor_expr, my_lib)
+            # t = TensorNetwork(tensor_expr, my_lib)
             t.execute(my_lib)
             # t = t.result_scalar(my_lib)
             t = t.result_tensor(my_lib)
+            # print(t)
             res = t[[]]
             # print("Resulting tensor:", res.to_canonical_string())
             # print("Resulting tensor:", res)
@@ -991,17 +1034,25 @@ class MadLoop7(object):
         # print("Before Dot product substitution!\n", me)
 
         # Multiply in external polarization vectors spin-sum
-        me = me * E("denom")(pol_spin_sum_denom)
+        # me = me * E("denom")(pol_spin_sum_denom)
+        for v in pol_spin_sum_input_pieces_denom.values():
+            me = me * E("denom")(v)
 
         # Substitute dot products appearing in denominators now
-        for src, trgt in dot_products_replacement:
-            me = me.replace(src, trgt, repeat=True)
+        def process_denom(match):
+            denom_expr = match[S("x_")]
+            # print("Processing denom:", denom_expr.to_canonical_string())
+            for src, trgt in dot_products_replacement:
+                denom_expr = denom_expr.replace(src, trgt, repeat=True)
+            # print("Processed denom:", denom_expr.to_canonical_string())
+            return E("denom")(denom_expr)
+
+        me = me.replace(E("denom(x_)"), lambda m: process_denom(m))
 
         # Unwrap denominators
         me = me.replace(E("denom(x_)"), E("1/x_"))
 
         # print("After Dot product substitution!\n", me)
-
         return me
 
     def build_matrix_element_expression_tensor_networks(self, process: HardCodedProcess, expressions: dict[Any, Any], mode: EvalMode) -> Any:
@@ -1024,6 +1075,8 @@ class MadLoop7(object):
                     "Loop x loop matrix element expression building not implemented yet!")
 
     def export_evaluator_tensor_networks(self, process: HardCodedProcess, matrix_element_expression: Any, mode: EvalMode) -> None:
+        logger.info(
+            "Exporting evaluator tensor networks for process %s in mode %s", process.name, mode)
         self.import_symbolica_community()
         from symbolica_community.tensors import TensorNetwork, Representation, TensorStructure, TensorLibrary  # type: ignore # nopep8
         from symbolica_community import Expression, S, E  # type: ignore # nopep8
@@ -1039,7 +1092,7 @@ class MadLoop7(object):
         def p4(i, j):
             return P4(i, ';', j)
 
-        my_lib = TensorLibrary.weyl()
+        my_lib = TensorLibrary.hep_lib()
         match mode:
             case EvalMode.TREExTREE:
 
@@ -1070,6 +1123,7 @@ class MadLoop7(object):
                 # Do a cleaner filter eventually,
                 model_param_symbols = [s for s in matrix_element_expression.get_all_symbols(
                     False) if s not in kinematic_symbols]
+
                 model = get_model(process.model)
                 model_parameters = model.get('parameter_dict')
                 matrix_element_expression = matrix_element_expression.collect_factors()

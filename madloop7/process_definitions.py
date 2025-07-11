@@ -162,6 +162,51 @@ HARDCODED_PROCESSES_MADGRAPH = {
 }
 
 HARDCODED_PROCESSES_GAMMALOOP = {
+    'ddx_ssx': HardCodedProcess(
+        name='ddx_ssx_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=4,
+        gamma_loop_generation=[
+            """
+            generate d d~ > s s~ | g d s QCD=2 QED=0 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(3*3*2*2)",
+    ),
+    'ddx_ddx': HardCodedProcess(
+        name='ddx_ddx_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=4,
+        gamma_loop_generation=[
+            """
+            generate d d~ > d d~ | g d QCD=2 QED=0 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(3*3*2*2)",
+    ),
+    'ddx_ssxuux': HardCodedProcess(
+        name='ddx_ssxuux_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=6,
+        gamma_loop_generation=[
+            """
+            generate d d~ > s s~ u u~ | g d s u QCD=4 QED=0 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(3*3*2*2)",
+    ),
     'gg_gg': HardCodedProcess(
         name='gg_gg_gammaloop',
         model="sm",

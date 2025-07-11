@@ -38,7 +38,7 @@ MODEL_PARAMS = [
     %(model_parameters)s
 ]
 
-N_HORNER_ITERATIONS = 100
+N_HORNER_ITERATIONS = 5
 N_CORES = 1
 OPRIMIZATION_LEVEL = 3
 COMPILER = None  # '/opt/local/bin/gcc'

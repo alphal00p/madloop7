@@ -18,6 +18,15 @@ Alternatively, you can specify custom path to your environment-wide installation
 
 This code has been tested with `python3.12`.
 
+## Tests
+
+To run the tests, you can use `pytest`:
+
+```bash
+cd madloop7/tests
+pytest
+```
+
 ## Usage
 
 Run `/bin/ml7.py --help` for details on the options to steer `MadLoop7`.

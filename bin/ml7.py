@@ -3,10 +3,9 @@
 import os  # nopep8
 import sys  # nopep8
 import logging
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # nopep8
-from madloop7.utils import setup_logging, logger, MadLoop7Error
-from madloop7.engine import MadLoop7
+import yaml  # type: ignore # nopep8
 import argparse
+import multiprocessing
 
 parser = argparse.ArgumentParser(prog='MadLoop7')
 parser.add_argument('--config', '-c', type=str, default='config.yaml',
@@ -31,6 +30,25 @@ generate_command.add_argument('--tree_graph_ids', '-tids', type=int, nargs="+", 
 generate_command.add_argument('--loop_graph_ids', '-lids', type=int, nargs="+", default=None,
                               help='list of loop graph ids to consider for the matrix element evaluator')
 
+generate_command.add_argument('--inline_asm', '-asm', type=str, default="default", choices=["default", "none"],
+                              help="Whether to enable inline assembly or not during symbolica's codegen. default=%(default)s")
+generate_command.add_argument('--optimisation_level', '-O', type=int, default=3,
+                              help="Optimization level for symbolica's codegen. default=%(default)s")
+generate_command.add_argument('--targets', '-t', type=str, nargs="+", default=[],
+                              help='Targets for the evaluations of this process. Specify as list of strings, i.e. "0.12+0.45j".')
+generate_command.add_argument('--n_cores', '-c', type=int, default=multiprocessing.cpu_count(),
+                              help='Number of cores for generating the expression and building the evaluator. default=%(default)s')
+generate_command.add_argument('--work_in_emr', '-emr', type=bool, default=True, action=argparse.BooleanOptionalAction,
+                              help='Whether to work in the Edge Momentum Representation when building the matrix element expression. default=%(default)s')
+generate_command.add_argument('--simplify_amplitude_gamma_algebra', '-saga', type=bool, default=False, action=argparse.BooleanOptionalAction,
+                              help='Whether to simplify the gamma algebra at the amplitude level before building the expression for the squared matrix element. default=%(default)s')
+generate_command.add_argument('--step_through_network_execution', '-step', type=bool, default=False, action=argparse.BooleanOptionalAction,
+                              help='Whether to step through the tensor network execution. default=%(default)s')
+generate_command.add_argument('--expand_before_building_evaluator', '-exp', type=bool, default=False, action=argparse.BooleanOptionalAction,
+                              help='Expand expression before building evaluator in Symbolica. default=%(default)s')
+generate_command.add_argument('--physical_vector_polarization_sum', '-phys', type=bool, default=True, action=argparse.BooleanOptionalAction,
+                              help='Use physical vector polarisation sums for vectors, so that external ghosts are not necessary. default=%(default)s')
+
 clean_command = subparsers.add_parser(
     'clean', help='Clean a process output')
 
@@ -50,8 +68,27 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.command == 'generate':
+        evaluated_targets = []
+        for t in args.targets:
+            try:
+                evaluated_targets.append(eval(t))
+            except Exception as e:
+                raise ValueError(
+                    f"Could not evaluate target to a complex value '{t}': {e}")
+        args.targets = evaluated_targets
+
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+    os.environ['SYMBOLICA_COMMUNITY_PATH'] = config['symbolica_community_path']
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))  # nopep8
+    from madloop7.utils import setup_logging, logger, MadLoop7Error
+    from madloop7.engine import MadLoop7
+
     setup_logging(logging.DEBUG if args.debug else logging.INFO)
-    madloop7 = MadLoop7(args.config)
+
+    madloop7 = MadLoop7(args.config, **args.__dict__)
 
     match args.command:
         case 'generate':

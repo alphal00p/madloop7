@@ -235,7 +235,67 @@ HARDCODED_PROCESSES_GAMMALOOP = {
         graphs_output=[
             ("tree", "<automatically_generated>"),
         ],
+        overall_factor="1/(3*3*2*2)*1/(2*1)",
+    ),
+    'gg_ddx': HardCodedProcess(
+        name='gg_ddx_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=4,
+        gamma_loop_generation=[
+            """
+            generate g g > d d~ | g d QCD=2 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(8*8*2*2)*1/(1*1)",
+    ),
+    'gg_ddxg': HardCodedProcess(
+        name='gg_ddxg_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=5,
+        gamma_loop_generation=[
+            """
+            generate g g > d d~ g | g d QCD=3 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(8*8*2*2)*1/(1*1)",
+    ),
+    'gg_ddxgg': HardCodedProcess(
+        name='gg_ddxgg_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=6,
+        gamma_loop_generation=[
+            """
+            generate g g > d d~ g g | g d QCD=4 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
         overall_factor="1/(8*8*2*2)*1/(2*1)",
+    ),
+    'gg_ddxggg': HardCodedProcess(
+        name='gg_ddxggg_gammaloop',
+        model="sm",
+        madgraph_generation=None,
+        n_external=7,
+        gamma_loop_generation=[
+            """
+            generate g g > d d~ g g g | g d QCD=5 [{0} QCD=0] -a -num_grouping group_identical_graphs_up_to_sign
+        """,
+        ],
+        graphs_output=[
+            ("tree", "<automatically_generated>"),
+        ],
+        overall_factor="1/(8*8*2*2)*1/(2*3*1)",
     ),
 }
 

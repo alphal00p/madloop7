@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
 # MG5aMC
-wget https://launchpad.net/mg5amcnlo/3.0/3.6.x/+download/MG5_aMC_v3.5.7.tar.gz
-tar -czf MG5_aMC_v3.5.7.tar.gz
+wget https://launchpad.net/mg5amcnlo/3.0/3.5.x/+download/MG5_aMC_v3.5.8.tar.gz
+tar -xzf MG5_aMC_v3.5.8.tar.gz
 
 # MadSymbolic
-cd MG5_aMC_v3_5_7/PLUGIN
+cd MG5_aMC_v3_5_8/PLUGIN
 git clone git@github.com:alphal00p/madsymbolic.git
 cd -
 

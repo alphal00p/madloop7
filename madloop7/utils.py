@@ -27,8 +27,7 @@ class Colour(StrEnum):
 
 def setup_logging(level: int = logging.INFO) -> None:
     logging.basicConfig(
-        format=f'{Colour.GREEN}%(levelname)s{Colour.END} {Colour.BLUE}%(funcName)s l.%(lineno)d{
-            Colour.END} {Colour.CYAN}t=%(asctime)s.%(msecs)03d{Colour.END} > %(message)s',
+        format=f'{Colour.GREEN}%(levelname)s{Colour.END} {Colour.BLUE}%(funcName)s l.%(lineno)d{Colour.END} {Colour.CYAN}t=%(asctime)s.%(msecs)03d{Colour.END} > %(message)s',
         datefmt='%Y-%m-%d,%H:%M:%S'
     )
     logger.setLevel(level)

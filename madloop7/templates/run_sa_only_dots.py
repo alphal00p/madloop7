@@ -44,7 +44,7 @@ MODEL_PARAMS = [
 ]
 
 N_HORNER_ITERATIONS = 5
-N_CORES = N_CORES = multiprocessing.cpu_count()
+N_CORES = multiprocessing.cpu_count()
 OPRIMIZATION_LEVEL = %(optimisation_level)d
 INLINE_ASM = %(inline_asm)s
 COMPILER = None  # '/opt/local/bin/gcc'
